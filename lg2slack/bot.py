@@ -332,13 +332,30 @@ class SlackBot:
                     logger.info(f"Added text block, total blocks: {len(blocks)}")
 
                 # Send message with blocks (or just text if no blocks)
-                result = await say(
-                    text=response_text,  # Fallback text for notifications
-                    thread_ts=thread_ts,
-                    blocks=blocks if blocks else None,
-                )
-
-                logger.info(f"Message sent successfully, result ts={result.get('ts') if result else 'None'}")
+                # Try sending with blocks first, fallback to text-only if image download fails
+                try:
+                    result = await say(
+                        text=response_text,  # Fallback text for notifications
+                        thread_ts=thread_ts,
+                        blocks=blocks if blocks else None,
+                    )
+                    logger.info(f"Message sent successfully, result ts={result.get('ts') if result else 'None'}")
+                except Exception as e:
+                    # If error mentions invalid_blocks or downloading image, retry without image blocks
+                    error_str = str(e)
+                    if "invalid_blocks" in error_str or "downloading image" in error_str:
+                        logger.warning(f"Image blocks failed ({error_str}), retrying without images")
+                        # Keep text block and feedback block, remove image blocks
+                        blocks_without_images = [b for b in blocks if b.get("type") != "image"]
+                        result = await say(
+                            text=response_text,
+                            thread_ts=thread_ts,
+                            blocks=blocks_without_images if blocks_without_images else None,
+                        )
+                        logger.info(f"Message sent without images, result ts={result.get('ts') if result else 'None'}")
+                    else:
+                        # Some other error, re-raise it
+                        raise
 
                 # Store mapping for feedback
                 if run_id and result and result.get("ts"):

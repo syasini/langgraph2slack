@@ -4,19 +4,25 @@ Handles input and output transformers that process messages before/after
 sending to LangGraph.
 """
 
-from typing import Callable, List, Awaitable
+from typing import Callable, List, Awaitable, Union
 from .config import MessageContext
+import inspect
 
 # Type alias for transformer functions
 # Signature: async def transformer(message: str, context: MessageContext) -> str
-TransformerFunc = Callable[[str, MessageContext], Awaitable[str]]
+# Or: async def transformer(message: str) -> str (context optional)
+TransformerFunc = Union[
+    Callable[[str, MessageContext], Awaitable[str]],
+    Callable[[str], Awaitable[str]]
+]
 
 
 class TransformerChain:
     """Manages a chain of transformers.
 
     Transformers are async functions that take (message, context) and return
-    a transformed message. They're applied in the order they were registered.
+    a transformed message. Context parameter is optional.
+    They're applied in the order they were registered.
 
     Example:
         chain = TransformerChain()
@@ -26,7 +32,7 @@ class TransformerChain:
             return f"[1] {msg}"
 
         @chain.add
-        async def second(msg, ctx):
+        async def second(msg):  # context optional
             return f"[2] {msg}"
 
         result = await chain.apply("hello", context)
@@ -44,6 +50,7 @@ class TransformerChain:
 
         Args:
             transformer: Async function (str, MessageContext) -> str
+                        or (str) -> str (context optional)
 
         Returns:
             The transformer function (so it works as a decorator)
@@ -52,6 +59,10 @@ class TransformerChain:
             @chain.add
             async def my_transformer(message, context):
                 return message.upper()
+
+            @chain.add
+            async def simple_transformer(message):
+                return message.lower()
         """
         self._transformers.append(transformer)
         return transformer
@@ -61,6 +72,7 @@ class TransformerChain:
 
         Each transformer receives the output of the previous one.
         If no transformers are registered, returns the message unchanged.
+        Automatically detects if transformer accepts context parameter.
 
         Args:
             message: Input message
@@ -80,7 +92,16 @@ class TransformerChain:
 
         # Apply each transformer in order
         for transformer in self._transformers:
-            result = await transformer(result, context)
+            # Check if transformer accepts context parameter
+            sig = inspect.signature(transformer)
+            param_count = len(sig.parameters)
+
+            if param_count >= 2:
+                # Transformer accepts (message, context)
+                result = await transformer(result, context)
+            else:
+                # Transformer only accepts (message)
+                result = await transformer(result)
 
         return result
 
