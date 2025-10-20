@@ -43,6 +43,7 @@ class StreamingHandler(BaseHandler):
         show_thread_id: bool = True,
         extract_images: bool = True,
         max_image_blocks: int = 5,
+        metadata_builder=None,
     ):
         """Initialize streaming handler.
 
@@ -57,6 +58,7 @@ class StreamingHandler(BaseHandler):
             show_thread_id: Whether to show thread_id in footer (default: True)
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
+            metadata_builder: Async function to build metadata dict from MessageContext
         """
         # Initialize base class
         super().__init__(
@@ -72,6 +74,7 @@ class StreamingHandler(BaseHandler):
         self.langgraph_client = langgraph_client
         self.slack_client = slack_client
         self.reply_in_thread = reply_in_thread
+        self.metadata_builder = metadata_builder
 
     async def process_message(
         self,
@@ -171,6 +174,9 @@ class StreamingHandler(BaseHandler):
         chunk_count = 0
         run_id = None
 
+        # Build metadata if builder is provided
+        metadata = await self.metadata_builder(context) if self.metadata_builder else {}
+
         try:
             # Start streaming from LangGraph
             # stream_mode="messages-tuple" gives us incremental message updates as tuples
@@ -183,6 +189,7 @@ class StreamingHandler(BaseHandler):
                 stream_mode=["messages-tuple"],
                 multitask_strategy="interrupt",
                 if_not_exists="create",
+                metadata=metadata,
             ):
                 chunk_count += 1
                 logger.debug(f"Chunk #{chunk_count}: event={chunk.event}")

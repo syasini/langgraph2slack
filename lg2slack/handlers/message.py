@@ -39,6 +39,7 @@ class MessageHandler(BaseHandler):
         show_thread_id: bool = True,
         extract_images: bool = True,
         max_image_blocks: int = 5,
+        metadata_builder=None,
     ):
         """Initialize message handler.
 
@@ -51,6 +52,7 @@ class MessageHandler(BaseHandler):
             show_thread_id: Whether to show thread_id in footer (default: True)
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
+            metadata_builder: Async function to build metadata dict from MessageContext
         """
         # Initialize base class
         super().__init__(
@@ -64,6 +66,7 @@ class MessageHandler(BaseHandler):
         )
         # Store handler-specific attributes
         self.client = langgraph_client
+        self.metadata_builder = metadata_builder
 
     async def process_message(
         self,
@@ -96,7 +99,7 @@ class MessageHandler(BaseHandler):
         logger.info(f"Using LangGraph thread: {langgraph_thread}")
 
         # Step 3: Send to LangGraph and wait for complete response
-        langgraph_response, run_id = await self._invoke_langgraph(transformed_input, langgraph_thread)
+        langgraph_response, run_id = await self._invoke_langgraph(transformed_input, langgraph_thread, context)
 
         # Step 4: Extract the actual message content
         response_text = self._extract_message_content(langgraph_response)
@@ -114,12 +117,13 @@ class MessageHandler(BaseHandler):
 
         return slack_formatted, blocks, langgraph_thread, run_id
 
-    async def _invoke_langgraph(self, message: str, thread_id: str) -> Tuple[dict, str]:
+    async def _invoke_langgraph(self, message: str, thread_id: str, context: MessageContext) -> Tuple[dict, str]:
         """Invoke LangGraph and wait for complete response.
 
         Args:
             message: Message to send to LangGraph
             thread_id: Thread ID for conversation continuity
+            context: Message context for metadata building
 
         Returns:
             Tuple of (completed_run, run_id)
@@ -129,6 +133,9 @@ class MessageHandler(BaseHandler):
         Raises:
             Exception: If LangGraph invocation fails
         """
+        # Build metadata if builder is provided
+        metadata = await self.metadata_builder(context) if self.metadata_builder else {}
+
         try:
             # Use LangGraph SDK to create a run and wait for completion
             run = await self.client.runs.create(
@@ -138,6 +145,7 @@ class MessageHandler(BaseHandler):
                     "messages": [{"role": "user", "content": message}]
                 },
                 if_not_exists="create",
+                metadata=metadata,
             )
 
             run_id = run["run_id"]

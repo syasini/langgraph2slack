@@ -51,6 +51,7 @@ class SlackBot:
         show_thread_id: bool = True,
         extract_images: bool = True,
         max_image_blocks: int = 5,
+        include_metadata: bool = True,
     ):
         """Initialize SlackBot.
 
@@ -65,6 +66,7 @@ class SlackBot:
             show_thread_id: Whether to show thread_id in footer (default: True)
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
+            include_metadata: Include Slack context as metadata in LangGraph (default: False)
         """
         logger.info("Initializing SlackBot...")
 
@@ -83,10 +85,12 @@ class SlackBot:
         self.show_thread_id = show_thread_id
         self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
+        self.include_metadata = include_metadata
 
         # Initialize transformer chains
         self._input_transformers = TransformerChain()
         self._output_transformers = TransformerChain()
+        self._metadata_transformers = TransformerChain()
 
         # Initialize LangSmith client for feedback
         self.langsmith_client = Client()
@@ -119,6 +123,7 @@ class SlackBot:
                 show_thread_id=self.show_thread_id,
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
+                metadata_builder=self._build_metadata,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:
@@ -131,6 +136,7 @@ class SlackBot:
                 show_thread_id=self.show_thread_id,
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
+                metadata_builder=self._build_metadata,
             )
             logger.info("Using MessageHandler (non-streaming)")
 
@@ -199,6 +205,30 @@ class SlackBot:
         """
         return self._output_transformers.add(func)
 
+    def transform_metadata(self, func: Callable) -> Callable:
+        """Decorator to add a metadata transformer.
+
+        Metadata transformers customize Slack context data sent to LangGraph.
+        If no transformer is provided, all MessageContext fields are sent by default.
+
+        Example:
+            @bot.transform_metadata
+            async def hash_user_id(context: MessageContext) -> dict:
+                import hashlib
+                return {
+                    "channel_id": context.channel_id,
+                    "user_id_hash": hashlib.sha256(context.user_id.encode()).hexdigest()[:16],
+                    "is_dm": context.is_dm,
+                }
+
+        Args:
+            func: Async function (MessageContext) -> dict
+
+        Returns:
+            The function (for decorator usage)
+        """
+        return self._metadata_transformers.add(func)
+
     def _load_config(
         self,
         assistant_id: Optional[str],
@@ -258,6 +288,39 @@ class SlackBot:
             return await handler.handle(request)
 
         return app
+
+    async def _build_metadata(self, context: MessageContext) -> dict:
+        """Build metadata dict from Slack context.
+
+        If include_metadata is False, returns empty dict.
+        If include_metadata is True and user has custom transformer, uses that.
+        Otherwise, returns all MessageContext fields.
+
+        Args:
+            context: Message context with Slack event data
+
+        Returns:
+            Metadata dict to pass to LangGraph
+        """
+        if not self.include_metadata:
+            return {}
+
+        # Check if user provided custom transformer
+        if self._metadata_transformers:
+            # Custom transformer - user builds metadata from scratch
+            # Pass empty dict as first arg since transformers expect (data, context)
+            return await self._metadata_transformers.apply({}, context)
+
+        # Default: return all MessageContext fields (exclude raw event)
+        return {
+            "slack_user_id": context.user_id,
+            "slack_channel_id": context.channel_id,
+            "slack_message_ts": context.message_ts,
+            "slack_thread_ts": context.thread_ts,
+            "slack_channel_type": context.channel_type,
+            "slack_is_dm": context.is_dm,
+            "slack_is_thread": context.is_thread,
+        }
 
     def _setup_slack_handlers(self) -> None:
         """Setup Slack event handlers.
