@@ -19,5 +19,13 @@ Example:
 from .bot import SlackBot
 from .config import BotConfig, MessageContext
 
-__version__ = "0.1.0"
+# Version is dynamically loaded from package metadata (pyproject.toml)
+# Use `uv version --bump patch|minor|major` to update version
+try:
+    from importlib.metadata import version, PackageNotFoundError
+    __version__ = version("lg2slack")
+except PackageNotFoundError:
+    # Fallback for development (package not installed)
+    __version__ = "0.0.0.dev"
+
 __all__ = ["SlackBot", "BotConfig", "MessageContext"]
