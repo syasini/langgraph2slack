@@ -77,16 +77,21 @@ def clean_markdown(text: str) -> str:
     # Use non-greedy match to handle URLs with parentheses
     text = re.sub(r"!\[([^\]]*)\]\((.+?)\)", r"!<\2|\1>", text)
 
-    # Convert bold: **text** -> *text* (Slack uses single asterisk for bold)
-    text = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", text)
-
-    # Convert italic: *text* -> _text_ (avoid matching already converted bold)
-    # Negative lookbehind/ahead to avoid matching double asterisks
-    text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"_\1_", text)
-
     # Clean up code blocks: remove language identifier after ```
     # Slack doesn't use language identifiers in the same way
     text = re.sub(r"^```[^\n]*\n", "```\n", text, flags=re.MULTILINE)
+
+    # FIXME: skipping bold and italic conversions, since currently they get
+    # removed from the final replaced text in the block. 
+
+    # Convert bold: **text** -> *text* (Slack uses single asterisk for bold)
+    # text = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", text)
+
+    # Convert italic: *text* -> _text_ (avoid matching already converted bold)
+    # Negative lookbehind/ahead to avoid matching double asterisks
+    # text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"_\1_", text)
+
+    
 
     # Convert bullet points: - or * at start of line -> •
     # text = re.sub(r"^\s*[-*]\s", "• ", text, flags=re.MULTILINE)

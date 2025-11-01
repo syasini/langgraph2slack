@@ -72,6 +72,10 @@ SLACK_SIGNING_SECRET=your-signing-secret
 # This is the key you will set in langgraph.json
 ASSISTANT_ID=my-assistant
 ```
+You can find `SLACK_SIGNING_SECRET` and `SLACK_BOT_TOKEN` in the following pages on `https://api.slack.com/apps`:
+
+![slack_app_creds](./media/slack_secrets_page.png)
+
 
 ### 4. Configure LangGraph Deployment
 
@@ -91,6 +95,8 @@ Add your agent and Slack server paths to `langgraph.json`:
 ```
 
 ## Local Testing
+
+![local_demo](./media/local_demo.gif)
 
 Before deploying to production, test your bot locally using ngrok.
 
@@ -198,6 +204,8 @@ Your bot is now live! Chat with it by:
 ## Advanced Usage
 
 ### Configuration Options
+![advanced_features](./media/advanced_features_demo.gif)
+
 
 The `SlackBot` class accepts many parameters to customize behavior:
 
@@ -310,7 +318,7 @@ bot = SlackBot(message_types=["AIMessageChunk"])
 # Stream AI responses AND tool calls
 bot = SlackBot(message_types=["AIMessageChunk", "tool"])
 
-# Stream everything (verbose!)
+# Stream everything (highly verbose!)
 bot = SlackBot(message_types=["AIMessageChunk", "ai", "tool", "system"])
 ```
 
@@ -319,10 +327,10 @@ bot = SlackBot(message_types=["AIMessageChunk", "ai", "tool", "system"])
 Show a visual indicator while the bot is thinking:
 
 ```python
-# Show eyes emoji while processing
-bot = SlackBot(processing_reaction="eyes")
+# Show hourglass emoji while processing
+bot = SlackBot(processing_reaction="hourglass")
 
-# Other options: "hourglass", "robot_face", "thinking_face", etc.
+# Other options: "eyes", "robot_face", "thinking_face", etc.
 # Must be emoji NAME, not the emoji character itself
 ```
 
@@ -350,9 +358,10 @@ Collect user feedback and send it to LangSmith:
 
 ```python
 bot = SlackBot(
+    show_thread_id=True,                # Show thread ID for debugging
     show_feedback_buttons=True,         # Show thumbs up/down
     enable_feedback_comments=True,      # Allow text feedback for negative reactions
-    show_thread_id=True,                # Show thread ID for debugging
+    
 )
 ```
 
@@ -361,38 +370,31 @@ bot = SlackBot(
 ### Architecture
 
 ```
-Slack → lg2slack → [INPUT TRANSFORMERS] → LangGraph
-                                              ↓
-Slack ← lg2slack ← [OUTPUT TRANSFORMERS] ← LangGraph
+Slack [user] → lg2slack → [INPUT TRANSFORMERS] → LangGraph [HumanMessage]
+                                                     ↓
+Slack [bot]  ← lg2slack ← [OUTPUT TRANSFORMERS] ← LangGraph [AIMessage]
 ```
 
 ### Message Flow
 
 1. **User sends message** in Slack (DM or @mention)
-2. **Slack sends event** to `/events/slack` endpoint
-3. **Input transformers** process the message
-4. **Message sent to LangGraph** as HumanMessage with thread_id
-5. **LangGraph processes** and generates response
+2. **Input transformers** process the message
+3. **Slack sends event** to `/events/slack` endpoint 
+4. **Message passed to LangGraph** as HumanMessage with thread_id
+5. **LangGraph processes** and generates response as AIMessage
 6. **Streaming mode:** Each token immediately forwarded to Slack
 7. **Output transformers** process the complete response
 8. **Final message** displayed in Slack with optional feedback buttons
-
-### Thread Management
-
-lg2slack automatically manages conversation continuity:
-
-- **Deterministic thread IDs:** Same Slack thread always maps to same LangGraph conversation using UUID5
-- **Conversation history:** LangGraph's MessagesState maintains full context
-- **Thread participation:** Bot auto-responds in threads where it has participated
-- **No database needed:** Thread mapping is deterministic and stateless
+9. **Feedback and Metadata** optionally stored in LangSmith if enabled in `.env`
 
 ### Streaming vs Non-Streaming
+lg2slack assumes you are generating streaming responses from LangGraph, but you have the option to show them on Slack in streaming on non-streaming modes.
 
 **Streaming mode (default):**
-- True low-latency streaming
+- Low-latency streaming
 - Each token forwarded immediately to Slack
-- Better user experience with instant feedback
 - Uses Slack's `chat_startStream`, `chat_appendStream`, `chat_stopStream` APIs
+- If images are extracted, the text will be replaced with a markdown block.  
 
 **Non-streaming mode:**
 ```python
@@ -402,24 +404,13 @@ bot = SlackBot(streaming=False)
 - Sends entire message at once
 - Useful for debugging or if streaming causes issues
 
-## Feature Highlights
-
-- **Low-latency streaming** - Instant token-by-token responses
-- **LangSmith feedback integration** - Thumbs up/down buttons with optional text feedback
-- **Automatic image handling** - Converts markdown images to native Slack blocks
-- **Flexible transformers** - Customize inputs, outputs, and metadata
-- **Smart thread management** - Automatic conversation continuity across messages
-- **Processing reactions** - Visual feedback while bot is thinking
-- **Message type filtering** - Control verbosity by filtering AI chunks, tools, etc.
-- **Metadata tracking** - Automatic Slack context passed to LangSmith for analytics
-
 ## Examples
 
 Check out the [`examples/plant_bot`](examples/plant_bot/) directory for a complete working example:
 
 - **[plant_agent.py](examples/plant_bot/plant_agent.py)** - LangGraph agent with conditional image search
 - **[slack_server.py](examples/plant_bot/slack_server.py)** - SlackBot setup with transformers
-- **[langgraph.json](examples/plant_bot/langgraph.json)** - Full deployment configuration
+- **[langgraph.json](examples/plant_bot/langgraph.json)** - Simple deployment configuration
 
 ## Requirements
 
