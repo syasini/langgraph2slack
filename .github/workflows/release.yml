@@ -22,8 +22,8 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
-      - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+      - name: Sync dependencies
+        run: uv sync --extra dev
 
       - name: Run tests
         run: uv run pytest tests/ -v
