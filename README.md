@@ -74,7 +74,7 @@ ASSISTANT_ID=my-assistant
 ```
 You can find `SLACK_SIGNING_SECRET` and `SLACK_BOT_TOKEN` in the following pages on `https://api.slack.com/apps`:
 
-![slack_app_creds](./media/slack_secrets_page.png)
+![slack_app_creds](https://raw.githubusercontent.com/syasini/lg2slack/main/media/slack_secrets_page.png)
 
 
 ### 4. Configure LangGraph Deployment
@@ -96,7 +96,7 @@ Add your agent and Slack server paths to `langgraph.json`:
 
 ## Local Testing
 
-![local_demo](./media/local_demo.gif)
+![local_demo](https://raw.githubusercontent.com/syasini/lg2slack/main/media/local_demo.gif)
 
 Before deploying to production, test your bot locally using ngrok.
 
@@ -204,7 +204,7 @@ Your bot is now live! Chat with it by:
 ## Advanced Usage
 
 ### Configuration Options
-![advanced_features](./media/advanced_features_demo.gif)
+![advanced_features](https://raw.githubusercontent.com/syasini/lg2slack/main/media/advanced_features_demo.gif)
 
 
 The `SlackBot` class accepts many parameters to customize behavior:
@@ -406,11 +406,11 @@ bot = SlackBot(streaming=False)
 
 ## Examples
 
-Check out the [`examples/plant_bot`](examples/plant_bot/) directory for a complete working example:
+Check out the [`examples/plant_bot`](https://github.com/syasini/lg2slack/tree/main/examples/plant_bot) directory for a complete working example:
 
-- **[plant_agent.py](examples/plant_bot/plant_agent.py)** - LangGraph agent with conditional image search
-- **[slack_server.py](examples/plant_bot/slack_server.py)** - SlackBot setup with transformers
-- **[langgraph.json](examples/plant_bot/langgraph.json)** - Simple deployment configuration
+- **[plant_agent.py](https://github.com/syasini/lg2slack/blob/main/examples/plant_bot/plant_agent.py)** - LangGraph agent with conditional image search
+- **[slack_server.py](https://github.com/syasini/lg2slack/blob/main/examples/plant_bot/slack_server.py)** - SlackBot setup with transformers
+- **[langgraph.json](https://github.com/syasini/lg2slack/blob/main/examples/plant_bot/langgraph.json)** - Simple deployment configuration
 
 ## Requirements
 
