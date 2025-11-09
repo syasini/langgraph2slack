@@ -408,8 +408,8 @@ class StreamingHandler(BaseHandler):
                 import re
                 text_without_images = re.sub(r"!\[([^\]]*)\]\(.+?\)", "", complete_response)
 
-                # Get the current message text for the fallback
-                slack_text = clean_markdown(text_without_images)
+                # Convert to Slack block format (for_blocks=True converts **bold** -> *bold*, etc.)
+                slack_text = clean_markdown(text_without_images, for_blocks=True)
 
                 # Create a text section block to preserve the streamed content
                 text_block = {

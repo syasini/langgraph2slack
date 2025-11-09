@@ -142,6 +142,92 @@ print("test")
         result = clean_markdown(input_md)
         assert result == "!<url1|img1>!<url2|img2>!<url3|img3>"
 
+    # Tests for for_blocks parameter (bold/italic/bullet conversion)
+    # ------------------------------------------------------------------------
+
+    def test_bold_not_converted_for_streaming(self):
+        """Bold should NOT be converted when for_blocks=False (streaming)."""
+        input_md = "This is **bold text** here"
+        result = clean_markdown(input_md, for_blocks=False)
+        # Should keep standard markdown format
+        assert result == "This is **bold text** here"
+
+    def test_bold_converted_for_blocks(self):
+        """Bold should be converted to Slack format when for_blocks=True."""
+        input_md = "This is **bold text** here"
+        result = clean_markdown(input_md, for_blocks=True)
+        # Should convert to Slack mrkdwn (single asterisk)
+        assert result == "This is *bold text* here"
+
+    def test_italic_not_converted_for_streaming(self):
+        """Italic should NOT be converted when for_blocks=False (streaming)."""
+        input_md = "This is *italic text* here"
+        result = clean_markdown(input_md, for_blocks=False)
+        # Should keep standard markdown format
+        assert result == "This is *italic text* here"
+
+    def test_italic_converted_for_blocks(self):
+        """Italic should be converted to Slack format when for_blocks=True."""
+        input_md = "This is *italic text* here"
+        result = clean_markdown(input_md, for_blocks=True)
+        # Should convert to Slack mrkdwn (underscore)
+        assert result == "This is _italic text_ here"
+
+    def test_mixed_bold_and_italic_for_blocks(self):
+        """Mixed bold and italic should both convert correctly."""
+        input_md = "This is **bold** and this is *italic* text"
+        result = clean_markdown(input_md, for_blocks=True)
+        # Bold -> single asterisk, italic -> underscore
+        assert result == "This is *bold* and this is _italic_ text"
+
+    def test_bullets_not_converted_for_streaming(self):
+        """Bullets should NOT be converted when for_blocks=False (streaming)."""
+        input_md = "- First item\n- Second item\n- Third item"
+        result = clean_markdown(input_md, for_blocks=False)
+        # Should keep standard markdown format
+        assert result == "- First item\n- Second item\n- Third item"
+
+    def test_bullets_converted_for_blocks(self):
+        """Bullets should be converted to • when for_blocks=True."""
+        input_md = "- First item\n- Second item\n- Third item"
+        result = clean_markdown(input_md, for_blocks=True)
+        # Should convert to bullet points
+        assert result == "• First item\n• Second item\n• Third item"
+
+    def test_asterisk_bullets_converted_for_blocks(self):
+        """Asterisk bullets should also convert to • for blocks."""
+        input_md = "* First item\n* Second item"
+        result = clean_markdown(input_md, for_blocks=True)
+        assert result == "• First item\n• Second item"
+
+    def test_indented_bullets_converted_for_blocks(self):
+        """Indented bullets should preserve indentation."""
+        input_md = "  - Indented item\n    - More indented"
+        result = clean_markdown(input_md, for_blocks=True)
+        assert result == "  • Indented item\n    • More indented"
+
+    def test_complex_markdown_for_blocks(self):
+        """Complex markdown with bold, italic, bullets, and links for blocks."""
+        input_md = """**Bold text** and *italic text*
+- First bullet
+- Second bullet with **bold**
+[Link](https://example.com)"""
+        result = clean_markdown(input_md, for_blocks=True)
+
+        # Check all conversions
+        assert "*Bold text*" in result  # Bold converted
+        assert "_italic text_" in result  # Italic converted
+        assert "• First bullet" in result  # Bullet converted
+        assert "• Second bullet with *bold*" in result  # Bullet + bold
+        assert "<https://example.com|Link>" in result  # Link converted
+
+    def test_default_parameter_is_streaming(self):
+        """Default behavior (no parameter) should be streaming mode."""
+        input_md = "**bold** and *italic* and - bullet"
+        result = clean_markdown(input_md)  # No parameter
+        # Should NOT convert bold/italic/bullets (same as for_blocks=False)
+        assert result == "**bold** and *italic* and - bullet"
+
 
 # ============================================================================
 # Tests for extract_markdown_images()

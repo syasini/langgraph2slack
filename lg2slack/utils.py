@@ -48,18 +48,20 @@ def is_dm(event: dict) -> bool:
     return event.get("channel_type") == "im"
 
 
-def clean_markdown(text: str) -> str:
+def clean_markdown(text: str, for_blocks: bool = False) -> str:
     """Convert standard markdown to Slack mrkdwn format.
 
-    Slack uses a slightly different markdown syntax (mrkdwn):
-    - Links: [text](url) -> <url|text>
-    - Images: ![alt](url) -> !<url|alt>
-    - Bold: **text** -> *text*
-    - Italic: *text* -> _text_
-    - Code blocks: ```language -> ```
+    Slack uses TWO different markdown parsers:
+    1. Streaming (markdown_text): Uses standard markdown (**bold**, *italic*, - bullets)
+    2. Blocks (mrkdwn): Uses Slack format (*bold*, _italic_, • bullets)
+
+    This function converts links/images for both, but only converts bold/italic/bullets
+    when for_blocks=True to match the block parser.
 
     Args:
         text: Standard markdown text
+        for_blocks: If True, convert bold/italic/bullets to Slack mrkdwn format.
+                   If False (default), only convert links/images (for streaming).
 
     Returns:
         Slack mrkdwn formatted text
@@ -67,6 +69,8 @@ def clean_markdown(text: str) -> str:
     Example:
         >>> clean_markdown("Check [this link](https://example.com)")
         'Check <https://example.com|this link>'
+        >>> clean_markdown("**bold** and *italic*", for_blocks=True)
+        '*bold* and _italic_'
     """
     # URL pattern that handles parentheses in URLs
     # Matches: non-paren chars OR balanced single-level parens like (text)
@@ -87,20 +91,26 @@ def clean_markdown(text: str) -> str:
     # Slack doesn't use language identifiers in the same way
     text = re.sub(r"^```[^\n]*\n", "```\n", text, flags=re.MULTILINE)
 
-    # FIXME: skipping bold and italic conversions, since currently they get
-    # removed from the final replaced text in the block. 
+    # Only convert bold/italic/bullets for blocks (mrkdwn format)
+    # For streaming (markdown_text), keep standard markdown
+    if for_blocks:
+        # Strategy: Use placeholders to avoid conflicts between bold/italic/bullet conversions
 
-    # Convert bold: **text** -> *text* (Slack uses single asterisk for bold)
-    # text = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", text)
+        # Step 1: Convert bullets FIRST (before italic, since * at line start could be mistaken for italic)
+        # Convert bullet points: - or * at start of line -> •
+        text = re.sub(r"^(\s*)[-*]\s+", r"\1• ", text, flags=re.MULTILINE)
 
-    # Convert italic: *text* -> _text_ (avoid matching already converted bold)
-    # Negative lookbehind/ahead to avoid matching double asterisks
-    # text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"_\1_", text)
+        # Step 2: Convert bold **text** to placeholder to avoid italic regex matching it
+        # Use a placeholder that won't appear in normal text
+        BOLD_START = "<<<BOLD_START>>>"
+        BOLD_END = "<<<BOLD_END>>>"
+        text = re.sub(r"\*\*([^*]+)\*\*", rf"{BOLD_START}\1{BOLD_END}", text)
 
-    
+        # Step 3: Now convert italic *text* -> _text_ (won't match placeholders)
+        text = re.sub(r"\*([^*]+)\*", r"_\1_", text)
 
-    # Convert bullet points: - or * at start of line -> •
-    # text = re.sub(r"^\s*[-*]\s", "• ", text, flags=re.MULTILINE)
+        # Step 4: Replace bold placeholders with Slack format
+        text = text.replace(BOLD_START, "*").replace(BOLD_END, "*")
 
     return text
 
