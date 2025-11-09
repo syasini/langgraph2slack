@@ -55,6 +55,7 @@ class SlackBot:
         max_image_blocks: int = 5,
         include_metadata: bool = True,
         processing_reaction: Optional[str] = None,
+        reactions: Optional[list[dict]] = None,
         message_types: Optional[list[str]] = None,
     ):
         """Initialize SlackBot.
@@ -75,9 +76,20 @@ class SlackBot:
                 When True, passes the following fields by default: slack_user_id,
                 slack_channel_id, slack_message_ts, slack_thread_ts, slack_channel_type,
                 slack_is_dm, slack_is_thread. Use @bot.transform_metadata to customize.
-            processing_reaction: Emoji name (not emoji character) to add as reaction while processing (default: None).
-                Must be a Slack emoji name like "eyes", "hourglass", "robot_face", not the actual emoji character.
-                Reaction is removed when done.
+            processing_reaction: (DEPRECATED - use reactions instead) Emoji name to add as reaction while processing.
+                Must be a Slack emoji name like "eyes", "hourglass", "robot_face".
+                Reaction is removed when done. Equivalent to:
+                reactions=[{"emoji": "eyes", "target": "user", "when": "processing", "persist": False}]
+            reactions: List of reaction configurations for flexible emoji control (default: None).
+                Each reaction config is a dict with:
+                - emoji (str, required): Slack emoji name like "eyes", "hourglass", "robot_face"
+                - target (str, required): "user" (react to user's message) or "bot" (react to bot's response)
+                - when (str, required): "processing" (during) or "complete" (after)
+                - persist (bool, optional): Keep reaction after done (default: False)
+                Example: reactions=[
+                    {"emoji": "eyes", "target": "user", "when": "processing"},
+                    {"emoji": "white_check_mark", "target": "bot", "when": "complete", "persist": True}
+                ]
             message_types: List of LangGraph message types to process in streaming mode (default: ["AIMessageChunk"]).
                 Only applies to streaming mode. Non-streaming mode always processes the final response.
                 Available message types from LangChain:
@@ -107,8 +119,10 @@ class SlackBot:
         self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
         self.include_metadata = include_metadata
-        self.processing_reaction = processing_reaction
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
+
+        # Normalize reaction configs (handle backward compatibility)
+        self.reactions = self._normalize_reactions(processing_reaction, reactions)
 
         # Initialize transformer chains
         self._input_transformers = TransformerChain()
@@ -289,6 +303,106 @@ class SlackBot:
 
         return config
 
+    def _normalize_reactions(
+        self,
+        processing_reaction: Optional[str],
+        reactions: Optional[list[dict]],
+    ) -> list[dict]:
+        """Normalize and validate reaction configurations.
+
+        Handles backward compatibility with processing_reaction parameter.
+
+        Args:
+            processing_reaction: Legacy single emoji for user message during processing
+            reactions: New flexible reaction configs
+
+        Returns:
+            List of normalized reaction configs
+
+        Raises:
+            ValueError: If reaction config is invalid
+        """
+        # Start with empty list
+        normalized = []
+
+        # Handle backward compatibility: processing_reaction -> reactions
+        if processing_reaction is not None:
+            if reactions is not None:
+                logger.warning(
+                    "Both processing_reaction and reactions provided. "
+                    "processing_reaction is deprecated. Using reactions only."
+                )
+            else:
+                # Convert legacy format to new format
+                normalized.append({
+                    "emoji": processing_reaction,
+                    "target": "user",
+                    "when": "processing",
+                    "persist": False,
+                })
+                logger.info(f"Converted processing_reaction='{processing_reaction}' to new reactions format")
+                return normalized
+
+        # Use new reactions format if provided
+        if reactions:
+            for idx, reaction in enumerate(reactions):
+                # Validate required fields
+                if not isinstance(reaction, dict):
+                    raise ValueError(f"Reaction config at index {idx} must be a dict, got {type(reaction)}")
+
+                emoji = reaction.get("emoji")
+                target = reaction.get("target")
+                when = reaction.get("when")
+
+                if not emoji:
+                    raise ValueError(f"Reaction config at index {idx} missing required field 'emoji'")
+                if not target:
+                    raise ValueError(f"Reaction config at index {idx} missing required field 'target'")
+                if not when:
+                    raise ValueError(f"Reaction config at index {idx} missing required field 'when'")
+
+                # Validate values
+                if target not in ["user", "bot"]:
+                    raise ValueError(
+                        f"Reaction config at index {idx} has invalid target='{target}'. "
+                        f"Must be 'user' or 'bot'."
+                    )
+                if when not in ["processing", "complete"]:
+                    raise ValueError(
+                        f"Reaction config at index {idx} has invalid when='{when}'. "
+                        f"Must be 'processing' or 'complete'."
+                    )
+
+                # Set default persist based on when:
+                # - processing: False (auto-remove when done)
+                # - complete: True (keep the reaction)
+                default_persist = when == "complete"
+
+                # Add normalized config with when-dependent persist default
+                normalized.append({
+                    "emoji": emoji,
+                    "target": target,
+                    "when": when,
+                    "persist": reaction.get("persist", default_persist),
+                })
+
+        return normalized
+
+    def _get_reactions_for(self, target: str, when: str) -> list[dict]:
+        """Get reactions matching target and when criteria.
+
+        Args:
+            target: "user" or "bot"
+            when: "processing" or "complete"
+
+        Returns:
+            List of matching reaction configs
+        """
+        return [
+            r for r in self.reactions
+            if r.get("target") == target and r.get("when") == when
+        ]
+
     def _create_fastapi_app(self) -> FastAPI:
         """Create FastAPI app with Slack routes.
 
@@ -377,15 +491,26 @@ class SlackBot:
             if self._bot_user_id:
                 message_text = message_text.replace(f"<@{self._bot_user_id}>", "").strip()
 
-            # Add processing reaction if configured
-            if self.processing_reaction:
-                await self._add_reaction(context.channel_id, context.message_ts, self.processing_reaction)
+            # Add user-processing reactions
+            user_processing_reactions = self._get_reactions_for("user", "processing")
+            for reaction in user_processing_reactions:
+                await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
 
             try:
                 # Process based on handler type
                 if self.streaming_enabled:
                     # Streaming: handler sends response directly to Slack
-                    stream_ts, thread_id, run_id = await self.handler.process_message(message_text, context)
+                    # Note: Handler will manage bot-processing and bot-complete reactions internally
+                    stream_ts, thread_id, run_id = await self.handler.process_message(
+                        message_text,
+                        context,
+                        bot_reactions=self.reactions,  # Pass reactions for bot message handling
+                    )
+
+                    # Add user-complete reactions after streaming completes
+                    user_complete_reactions = self._get_reactions_for("user", "complete")
+                    for reaction in user_complete_reactions:
+                        await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
 
                     # Store mapping for feedback
                     if run_id and stream_ts:
@@ -400,10 +525,6 @@ class SlackBot:
 
                 else:
                     # Non-streaming: handler returns response, we send it
-                    logger.info("Non-streaming mode: calling handler.process_message")
-                    response_text, blocks, thread_id, run_id = await self.handler.process_message(message_text, context)
-                    logger.info(f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}")
-
                     # Determine thread_ts based on reply_in_thread setting
                     if self.reply_in_thread:
                         # Always reply in thread (use message ts if not already in thread)
@@ -411,6 +532,27 @@ class SlackBot:
                     else:
                         # Only reply in thread if message was already in a thread
                         thread_ts = event.get("thread_ts")
+
+                    # Check if we need bot-processing reactions
+                    bot_processing_reactions = self._get_reactions_for("bot", "processing")
+                    placeholder_ts = None
+
+                    if bot_processing_reactions:
+                        # Send placeholder message to show we're thinking
+                        placeholder_result = await say(
+                            text="Thinking...",
+                            thread_ts=thread_ts,
+                        )
+                        placeholder_ts = placeholder_result.get("ts") if placeholder_result else None
+
+                        # Add bot-processing reactions to placeholder
+                        if placeholder_ts:
+                            for reaction in bot_processing_reactions:
+                                await self._add_reaction(context.channel_id, placeholder_ts, reaction.get("emoji"))
+
+                    logger.info("Non-streaming mode: calling handler.process_message")
+                    response_text, blocks, thread_id, run_id = await self.handler.process_message(message_text, context)
+                    logger.info(f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}")
 
                     logger.info(f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks")
 
@@ -428,31 +570,59 @@ class SlackBot:
                         blocks = [text_block] + blocks
                         logger.info(f"Added text block, total blocks: {len(blocks)}")
 
-                    # Send message with blocks (or just text if no blocks)
-                    # Try sending with blocks first, fallback to text-only if image download fails
-                    try:
-                        result = await say(
-                            text=response_text,  # Fallback text for notifications
-                            thread_ts=thread_ts,
-                            blocks=blocks if blocks else None,
-                        )
-                        logger.info(f"Message sent successfully, result ts={result.get('ts') if result else 'None'}")
-                    except Exception as e:
-                        # If error mentions invalid_blocks or downloading image, retry without image blocks
-                        error_str = str(e)
-                        if "invalid_blocks" in error_str or "downloading image" in error_str:
-                            logger.warning(f"Image blocks failed ({error_str}), retrying without images")
-                            # Keep text block and feedback block, remove image blocks
-                            blocks_without_images = [b for b in blocks if b.get("type") != "image"]
-                            result = await say(
+                    # Update placeholder or send new message
+                    if placeholder_ts:
+                        # Update the placeholder message
+                        logger.info(f"Updating placeholder message {placeholder_ts}")
+                        try:
+                            await self.slack_app.client.chat_update(
+                                channel=context.channel_id,
+                                ts=placeholder_ts,
                                 text=response_text,
-                                thread_ts=thread_ts,
-                                blocks=blocks_without_images if blocks_without_images else None,
+                                blocks=blocks if blocks else None,
                             )
-                            logger.info(f"Message sent without images, result ts={result.get('ts') if result else 'None'}")
-                        else:
-                            # Some other error, re-raise it
-                            raise
+                            result = {"ts": placeholder_ts}
+                        except Exception as e:
+                            # If error mentions invalid_blocks or downloading image, retry without image blocks
+                            error_str = str(e)
+                            if "invalid_blocks" in error_str or "downloading image" in error_str:
+                                logger.warning(f"Image blocks failed ({error_str}), retrying without images")
+                                blocks_without_images = [b for b in blocks if b.get("type") != "image"]
+                                await self.slack_app.client.chat_update(
+                                    channel=context.channel_id,
+                                    ts=placeholder_ts,
+                                    text=response_text,
+                                    blocks=blocks_without_images if blocks_without_images else None,
+                                )
+                                result = {"ts": placeholder_ts}
+                            else:
+                                raise
+                    else:
+                        # Send message with blocks (or just text if no blocks)
+                        # Try sending with blocks first, fallback to text-only if image download fails
+                        try:
+                            result = await say(
+                                text=response_text,  # Fallback text for notifications
+                                thread_ts=thread_ts,
+                                blocks=blocks if blocks else None,
+                            )
+                            logger.info(f"Message sent successfully, result ts={result.get('ts') if result else 'None'}")
+                        except Exception as e:
+                            # If error mentions invalid_blocks or downloading image, retry without image blocks
+                            error_str = str(e)
+                            if "invalid_blocks" in error_str or "downloading image" in error_str:
+                                logger.warning(f"Image blocks failed ({error_str}), retrying without images")
+                                # Keep text block and feedback block, remove image blocks
+                                blocks_without_images = [b for b in blocks if b.get("type") != "image"]
+                                result = await say(
+                                    text=response_text,
+                                    thread_ts=thread_ts,
+                                    blocks=blocks_without_images if blocks_without_images else None,
+                                )
+                                logger.info(f"Message sent without images, result ts={result.get('ts') if result else 'None'}")
+                            else:
+                                # Some other error, re-raise it
+                                raise
 
                     # Store mapping for feedback
                     if run_id and result and result.get("ts"):
@@ -465,10 +635,28 @@ class SlackBot:
                     else:
                         logger.warning(f"No run_id captured for non-streaming message")
 
+                    # Add user-complete reactions
+                    user_complete_reactions = self._get_reactions_for("user", "complete")
+                    for reaction in user_complete_reactions:
+                        await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+
+                    # Remove bot-processing reactions and add bot-complete reactions
+                    if result and result.get("ts"):
+                        # Remove bot-processing reactions if not persistent
+                        for reaction in bot_processing_reactions:
+                            if not reaction.get("persist", False):
+                                await self._remove_reaction(context.channel_id, result["ts"], reaction.get("emoji"))
+
+                        # Add bot-complete reactions to the bot's response
+                        bot_complete_reactions = self._get_reactions_for("bot", "complete")
+                        for reaction in bot_complete_reactions:
+                            await self._add_reaction(context.channel_id, result["ts"], reaction.get("emoji"))
+
             finally:
-                # Remove processing reaction if configured
-                if self.processing_reaction:
-                    await self._remove_reaction(context.channel_id, context.message_ts, self.processing_reaction)
+                # Remove all non-persistent user reactions
+                for reaction in self.reactions:
+                    if reaction.get("target") == "user" and not reaction.get("persist", False):
+                        await self._remove_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")
