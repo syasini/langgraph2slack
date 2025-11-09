@@ -55,6 +55,7 @@ class SlackBot:
         max_image_blocks: int = 5,
         include_metadata: bool = True,
         processing_reaction: Optional[str] = None,
+        reactions: Optional[list[dict]] = None,
         message_types: Optional[list[str]] = None,
     ):
         """Initialize SlackBot.
@@ -75,9 +76,20 @@ class SlackBot:
                 When True, passes the following fields by default: slack_user_id,
                 slack_channel_id, slack_message_ts, slack_thread_ts, slack_channel_type,
                 slack_is_dm, slack_is_thread. Use @bot.transform_metadata to customize.
-            processing_reaction: Emoji name (not emoji character) to add as reaction while processing (default: None).
-                Must be a Slack emoji name like "eyes", "hourglass", "robot_face", not the actual emoji character.
-                Reaction is removed when done.
+            processing_reaction: (DEPRECATED - use reactions instead) Emoji name to add as reaction while processing.
+                Must be a Slack emoji name like "eyes", "hourglass", "robot_face".
+                Reaction is removed when done. Equivalent to:
+                reactions=[{"emoji": "eyes", "target": "user", "when": "processing", "persist": False}]
+            reactions: List of reaction configurations for flexible emoji control (default: None).
+                Each reaction config is a dict with:
+                - emoji (str, required): Slack emoji name like "eyes", "hourglass", "robot_face"
+                - target (str, required): "user" (react to user's message) or "bot" (react to bot's response)
+                - when (str, required): "processing" (during) or "complete" (after)
+                - persist (bool, optional): Keep reaction after done (default: False)
+                Example: reactions=[
+                    {"emoji": "eyes", "target": "user", "when": "processing"},
+                    {"emoji": "white_check_mark", "target": "bot", "when": "complete", "persist": True}
+                ]
             message_types: List of LangGraph message types to process in streaming mode (default: ["AIMessageChunk"]).
                 Only applies to streaming mode. Non-streaming mode always processes the final response.
                 Available message types from LangChain:
@@ -107,8 +119,10 @@ class SlackBot:
         self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
         self.include_metadata = include_metadata
-        self.processing_reaction = processing_reaction
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
+
+        # Normalize reaction configs (handle backward compatibility)
+        self.reactions = self._normalize_reactions(processing_reaction, reactions)
 
         # Initialize transformer chains
         self._input_transformers = TransformerChain()
@@ -289,6 +303,101 @@ class SlackBot:
 
         return config
 
+    def _normalize_reactions(
+        self,
+        processing_reaction: Optional[str],
+        reactions: Optional[list[dict]],
+    ) -> list[dict]:
+        """Normalize and validate reaction configurations.
+
+        Handles backward compatibility with processing_reaction parameter.
+
+        Args:
+            processing_reaction: Legacy single emoji for user message during processing
+            reactions: New flexible reaction configs
+
+        Returns:
+            List of normalized reaction configs
+
+        Raises:
+            ValueError: If reaction config is invalid
+        """
+        # Start with empty list
+        normalized = []
+
+        # Handle backward compatibility: processing_reaction -> reactions
+        if processing_reaction is not None:
+            if reactions is not None:
+                logger.warning(
+                    "Both processing_reaction and reactions provided. "
+                    "processing_reaction is deprecated. Using reactions only."
+                )
+            else:
+                # Convert legacy format to new format
+                normalized.append({
+                    "emoji": processing_reaction,
+                    "target": "user",
+                    "when": "processing",
+                    "persist": False,
+                })
+                logger.info(f"Converted processing_reaction='{processing_reaction}' to new reactions format")
+                return normalized
+
+        # Use new reactions format if provided
+        if reactions:
+            for idx, reaction in enumerate(reactions):
+                # Validate required fields
+                if not isinstance(reaction, dict):
+                    raise ValueError(f"Reaction config at index {idx} must be a dict, got {type(reaction)}")
+
+                emoji = reaction.get("emoji")
+                target = reaction.get("target")
+                when = reaction.get("when")
+
+                if not emoji:
+                    raise ValueError(f"Reaction config at index {idx} missing required field 'emoji'")
+                if not target:
+                    raise ValueError(f"Reaction config at index {idx} missing required field 'target'")
+                if not when:
+                    raise ValueError(f"Reaction config at index {idx} missing required field 'when'")
+
+                # Validate values
+                if target not in ["user", "bot"]:
+                    raise ValueError(
+                        f"Reaction config at index {idx} has invalid target='{target}'. "
+                        f"Must be 'user' or 'bot'."
+                    )
+                if when not in ["processing", "complete"]:
+                    raise ValueError(
+                        f"Reaction config at index {idx} has invalid when='{when}'. "
+                        f"Must be 'processing' or 'complete'."
+                    )
+
+                # Add normalized config with default persist=False
+                normalized.append({
+                    "emoji": emoji,
+                    "target": target,
+                    "when": when,
+                    "persist": reaction.get("persist", False),
+                })
+
+        return normalized
+
+    def _get_reactions_for(self, target: str, when: str) -> list[dict]:
+        """Get reactions matching target and when criteria.
+
+        Args:
+            target: "user" or "bot"
+            when: "processing" or "complete"
+
+        Returns:
+            List of matching reaction configs
+        """
+        return [
+            r for r in self.reactions
+            if r["target"] == target and r["when"] == when
+        ]
+
     def _create_fastapi_app(self) -> FastAPI:
         """Create FastAPI app with Slack routes.
 
@@ -377,15 +486,26 @@ class SlackBot:
             if self._bot_user_id:
                 message_text = message_text.replace(f"<@{self._bot_user_id}>", "").strip()
 
-            # Add processing reaction if configured
-            if self.processing_reaction:
-                await self._add_reaction(context.channel_id, context.message_ts, self.processing_reaction)
+            # Add user-processing reactions
+            user_processing_reactions = self._get_reactions_for("user", "processing")
+            for reaction in user_processing_reactions:
+                await self._add_reaction(context.channel_id, context.message_ts, reaction["emoji"])
 
             try:
                 # Process based on handler type
                 if self.streaming_enabled:
                     # Streaming: handler sends response directly to Slack
-                    stream_ts, thread_id, run_id = await self.handler.process_message(message_text, context)
+                    # Note: Handler will manage bot-processing and bot-complete reactions internally
+                    stream_ts, thread_id, run_id = await self.handler.process_message(
+                        message_text,
+                        context,
+                        bot_reactions=self.reactions,  # Pass reactions for bot message handling
+                    )
+
+                    # Add user-complete reactions after streaming completes
+                    user_complete_reactions = self._get_reactions_for("user", "complete")
+                    for reaction in user_complete_reactions:
+                        await self._add_reaction(context.channel_id, context.message_ts, reaction["emoji"])
 
                     # Store mapping for feedback
                     if run_id and stream_ts:
@@ -465,10 +585,22 @@ class SlackBot:
                     else:
                         logger.warning(f"No run_id captured for non-streaming message")
 
+                    # Add user-complete reactions
+                    user_complete_reactions = self._get_reactions_for("user", "complete")
+                    for reaction in user_complete_reactions:
+                        await self._add_reaction(context.channel_id, context.message_ts, reaction["emoji"])
+
+                    # Add bot-complete reactions to the bot's response
+                    if result and result.get("ts"):
+                        bot_complete_reactions = self._get_reactions_for("bot", "complete")
+                        for reaction in bot_complete_reactions:
+                            await self._add_reaction(context.channel_id, result["ts"], reaction["emoji"])
+
             finally:
-                # Remove processing reaction if configured
-                if self.processing_reaction:
-                    await self._remove_reaction(context.channel_id, context.message_ts, self.processing_reaction)
+                # Remove all non-persistent user reactions
+                for reaction in self.reactions:
+                    if reaction["target"] == "user" and not reaction["persist"]:
+                        await self._remove_reaction(context.channel_id, context.message_ts, reaction["emoji"])
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")

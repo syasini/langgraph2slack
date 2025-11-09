@@ -83,6 +83,7 @@ class StreamingHandler(BaseHandler):
         self,
         message: str,
         context: MessageContext,
+        bot_reactions: list[dict] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Process message with streaming.
 
@@ -92,10 +93,13 @@ class StreamingHandler(BaseHandler):
         Args:
             message: Raw message text from Slack
             context: Message context with user/channel info
+            bot_reactions: List of reaction configs for bot message (default: None)
 
         Returns:
             Tuple of (stream_ts, thread_id, run_id) for feedback tracking
         """
+        if bot_reactions is None:
+            bot_reactions = []
         logger.info(f"Streaming message from user {context.user_id} in channel {context.channel_id}")
 
         # Step 1: Apply input transformers
@@ -126,27 +130,44 @@ class StreamingHandler(BaseHandler):
         )
         logger.info(f"Started Slack stream with ts: {stream_ts}")
 
-        # Step 6: Stream from LangGraph and forward to Slack
-        # CRITICAL: Each chunk is sent immediately as it arrives
-        complete_response, run_id = await self._stream_from_langgraph_to_slack(
-            message=transformed_input,
-            langgraph_thread=langgraph_thread,
-            slack_channel=context.channel_id,
-            slack_stream_ts=stream_ts,
-            context=context,
-        )
+        # Add bot-processing reactions to the streaming message
+        bot_processing_reactions = [r for r in bot_reactions if r["target"] == "bot" and r["when"] == "processing"]
+        for reaction in bot_processing_reactions:
+            await self._add_reaction(context.channel_id, stream_ts, reaction["emoji"])
 
-        # Step 7: Stop stream with optional image blocks
-        await self._stop_slack_stream(
-            channel_id=context.channel_id,
-            stream_ts=stream_ts,
-            complete_response=complete_response,
-            thread_id=langgraph_thread,
-        )
+        try:
+            # Step 6: Stream from LangGraph and forward to Slack
+            # CRITICAL: Each chunk is sent immediately as it arrives
+            complete_response, run_id = await self._stream_from_langgraph_to_slack(
+                message=transformed_input,
+                langgraph_thread=langgraph_thread,
+                slack_channel=context.channel_id,
+                slack_stream_ts=stream_ts,
+                context=context,
+            )
 
-        logger.info(f"Completed streaming for thread {langgraph_thread}")
+            # Step 7: Stop stream with optional image blocks
+            await self._stop_slack_stream(
+                channel_id=context.channel_id,
+                stream_ts=stream_ts,
+                complete_response=complete_response,
+                thread_id=langgraph_thread,
+            )
 
-        return stream_ts, langgraph_thread, run_id
+            # Add bot-complete reactions after streaming completes
+            bot_complete_reactions = [r for r in bot_reactions if r["target"] == "bot" and r["when"] == "complete"]
+            for reaction in bot_complete_reactions:
+                await self._add_reaction(context.channel_id, stream_ts, reaction["emoji"])
+
+            logger.info(f"Completed streaming for thread {langgraph_thread}")
+
+            return stream_ts, langgraph_thread, run_id
+
+        finally:
+            # Remove all non-persistent bot reactions
+            for reaction in bot_reactions:
+                if reaction["target"] == "bot" and not reaction["persist"]:
+                    await self._remove_reaction(context.channel_id, stream_ts, reaction["emoji"])
 
     async def _stream_from_langgraph_to_slack(
         self,
@@ -461,3 +482,49 @@ class StreamingHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Failed to get team ID: {e}", exc_info=True)
             raise
+
+    async def _add_reaction(
+        self,
+        channel_id: str,
+        message_ts: str,
+        emoji: str,
+    ) -> None:
+        """Add emoji reaction to a Slack message.
+
+        Args:
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
+        """
+        try:
+            await self.slack_client.client.reactions_add(
+                channel=channel_id,
+                timestamp=message_ts,
+                name=emoji,
+            )
+            logger.debug(f"Added reaction :{emoji}: to message {channel_id}:{message_ts}")
+        except Exception as e:
+            logger.warning(f"Failed to add reaction :{emoji}:: {e}")
+
+    async def _remove_reaction(
+        self,
+        channel_id: str,
+        message_ts: str,
+        emoji: str,
+    ) -> None:
+        """Remove emoji reaction from a Slack message.
+
+        Args:
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
+        """
+        try:
+            await self.slack_client.client.reactions_remove(
+                channel=channel_id,
+                timestamp=message_ts,
+                name=emoji,
+            )
+            logger.debug(f"Removed reaction :{emoji}: from message {channel_id}:{message_ts}")
+        except Exception as e:
+            logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
