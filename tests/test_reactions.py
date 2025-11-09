@@ -86,8 +86,8 @@ class TestReactionNormalization:
         assert len(bot.reactions) == 1
         assert bot.reactions[0]["emoji"] == "hourglass"
 
-    def test_normalize_reactions_with_defaults(self, minimal_bot):
-        """Should set default persist=False."""
+    def test_normalize_reactions_with_defaults_processing(self, minimal_bot):
+        """Should set default persist=False for processing reactions."""
         reactions = [
             {"emoji": "eyes", "target": "user", "when": "processing"}
         ]
@@ -96,30 +96,44 @@ class TestReactionNormalization:
         assert len(result) == 1
         assert result[0]["persist"] is False
 
-    def test_normalize_reactions_preserves_persist(self, minimal_bot):
-        """Should preserve explicit persist value."""
+    def test_normalize_reactions_with_defaults_complete(self, minimal_bot):
+        """Should set default persist=True for complete reactions."""
         reactions = [
-            {"emoji": "white_check_mark", "target": "bot", "when": "complete", "persist": True}
+            {"emoji": "white_check_mark", "target": "bot", "when": "complete"}
         ]
         result = minimal_bot._normalize_reactions(None, reactions)
 
         assert len(result) == 1
         assert result[0]["persist"] is True
 
+    def test_normalize_reactions_preserves_explicit_persist(self, minimal_bot):
+        """Should preserve explicit persist value regardless of when."""
+        reactions = [
+            {"emoji": "eyes", "target": "user", "when": "processing", "persist": True},
+            {"emoji": "white_check_mark", "target": "bot", "when": "complete", "persist": False}
+        ]
+        result = minimal_bot._normalize_reactions(None, reactions)
+
+        assert len(result) == 2
+        assert result[0]["persist"] is True  # Explicitly True for processing
+        assert result[1]["persist"] is False  # Explicitly False for complete
+
     def test_normalize_multiple_reactions(self, minimal_bot):
-        """Should normalize multiple reactions."""
+        """Should normalize multiple reactions with correct defaults."""
         reactions = [
             {"emoji": "eyes", "target": "user", "when": "processing"},
             {"emoji": "hourglass", "target": "bot", "when": "processing"},
-            {"emoji": "white_check_mark", "target": "bot", "when": "complete", "persist": True},
+            {"emoji": "white_check_mark", "target": "bot", "when": "complete"},
         ]
         result = minimal_bot._normalize_reactions(None, reactions)
 
         assert len(result) == 3
         assert result[0]["emoji"] == "eyes"
+        assert result[0]["persist"] is False  # Default for processing
         assert result[1]["emoji"] == "hourglass"
+        assert result[1]["persist"] is False  # Default for processing
         assert result[2]["emoji"] == "white_check_mark"
-        assert result[2]["persist"] is True
+        assert result[2]["persist"] is True  # Default for complete
 
     def test_invalid_reaction_not_dict(self, minimal_bot):
         """Should raise ValueError if reaction is not a dict."""

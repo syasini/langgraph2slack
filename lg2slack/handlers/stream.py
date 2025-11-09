@@ -131,9 +131,9 @@ class StreamingHandler(BaseHandler):
         logger.info(f"Started Slack stream with ts: {stream_ts}")
 
         # Add bot-processing reactions to the streaming message
-        bot_processing_reactions = [r for r in bot_reactions if r["target"] == "bot" and r["when"] == "processing"]
+        bot_processing_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"]
         for reaction in bot_processing_reactions:
-            await self._add_reaction(context.channel_id, stream_ts, reaction["emoji"])
+            await self._add_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
 
         try:
             # Step 6: Stream from LangGraph and forward to Slack
@@ -155,9 +155,9 @@ class StreamingHandler(BaseHandler):
             )
 
             # Add bot-complete reactions after streaming completes
-            bot_complete_reactions = [r for r in bot_reactions if r["target"] == "bot" and r["when"] == "complete"]
+            bot_complete_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "complete"]
             for reaction in bot_complete_reactions:
-                await self._add_reaction(context.channel_id, stream_ts, reaction["emoji"])
+                await self._add_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
 
             logger.info(f"Completed streaming for thread {langgraph_thread}")
 
@@ -166,8 +166,8 @@ class StreamingHandler(BaseHandler):
         finally:
             # Remove all non-persistent bot reactions
             for reaction in bot_reactions:
-                if reaction["target"] == "bot" and not reaction["persist"]:
-                    await self._remove_reaction(context.channel_id, stream_ts, reaction["emoji"])
+                if reaction.get("target") == "bot" and not reaction.get("persist", False):
+                    await self._remove_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
 
     async def _stream_from_langgraph_to_slack(
         self,
