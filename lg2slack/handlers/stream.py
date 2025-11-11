@@ -135,10 +135,16 @@ class StreamingHandler(BaseHandler):
         )
         logger.info(f"Started Slack stream with ts: {stream_ts}")
 
-        # Add bot-processing reactions to the streaming message
+        # Start bot-processing reactions in background (don't block LangGraph)
         bot_processing_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"]
-        for reaction in bot_processing_reactions:
-            await self._add_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
+        if bot_processing_reactions:
+            asyncio.create_task(
+                self._add_reactions_parallel(
+                    bot_processing_reactions,
+                    context.channel_id,
+                    stream_ts
+                )
+            )
 
         try:
             # Step 6: Stream from LangGraph and forward to Slack
@@ -159,10 +165,14 @@ class StreamingHandler(BaseHandler):
                 thread_id=langgraph_thread,
             )
 
-            # Add bot-complete reactions after streaming completes
+            # Add bot-complete reactions after streaming completes (parallel)
             bot_complete_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "complete"]
-            for reaction in bot_complete_reactions:
-                await self._add_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
+            if bot_complete_reactions:
+                await self._add_reactions_parallel(
+                    bot_complete_reactions,
+                    context.channel_id,
+                    stream_ts
+                )
 
             logger.info(f"Completed streaming for thread {langgraph_thread}")
 
@@ -549,3 +559,33 @@ class StreamingHandler(BaseHandler):
             logger.debug(f"Removed reaction :{emoji}: from message {channel_id}:{message_ts}")
         except Exception as e:
             logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
+
+    async def _add_reactions_parallel(
+        self,
+        reactions: list[dict],
+        channel_id: str,
+        message_ts: str,
+    ) -> None:
+        """Add multiple reactions in parallel with error handling.
+
+        This method adds all reactions concurrently using asyncio.gather,
+        which is much faster than sequential addition when multiple reactions
+        are configured.
+
+        Args:
+            reactions: List of reaction config dicts (with "emoji" key)
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+        """
+        if not reactions:
+            return
+
+        try:
+            # Add all reactions concurrently
+            await asyncio.gather(
+                *[self._add_reaction(channel_id, message_ts, r.get("emoji"))
+                  for r in reactions],
+                return_exceptions=True  # Don't fail entire batch if one fails
+            )
+        except Exception as e:
+            logger.error(f"Parallel reactions failed: {e}", exc_info=True)

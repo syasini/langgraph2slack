@@ -516,10 +516,16 @@ class SlackBot:
             if self._bot_user_id:
                 message_text = message_text.replace(f"<@{self._bot_user_id}>", "").strip()
 
-            # Add user-processing reactions
+            # Start user-processing reactions in background (don't block handler)
             user_processing_reactions = self._get_reactions_for("user", "processing")
-            for reaction in user_processing_reactions:
-                await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+            if user_processing_reactions:
+                asyncio.create_task(
+                    self._add_reactions_parallel(
+                        user_processing_reactions,
+                        context.channel_id,
+                        context.message_ts
+                    )
+                )
 
             try:
                 # Process based on handler type
@@ -532,10 +538,14 @@ class SlackBot:
                         bot_reactions=self.reactions,  # Pass reactions for bot message handling
                     )
 
-                    # Add user-complete reactions after streaming completes
+                    # Add user-complete reactions after streaming completes (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
-                    for reaction in user_complete_reactions:
-                        await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+                    if user_complete_reactions:
+                        await self._add_reactions_parallel(
+                            user_complete_reactions,
+                            context.channel_id,
+                            context.message_ts
+                        )
 
                     # Store mapping for feedback
                     if run_id and stream_ts:
@@ -660,10 +670,14 @@ class SlackBot:
                     else:
                         logger.warning(f"No run_id captured for non-streaming message")
 
-                    # Add user-complete reactions
+                    # Add user-complete reactions (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
-                    for reaction in user_complete_reactions:
-                        await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+                    if user_complete_reactions:
+                        await self._add_reactions_parallel(
+                            user_complete_reactions,
+                            context.channel_id,
+                            context.message_ts
+                        )
 
                     # Remove bot-processing reactions and add bot-complete reactions
                     if result and result.get("ts"):
@@ -672,10 +686,14 @@ class SlackBot:
                             if not reaction.get("persist", False):
                                 await self._remove_reaction(context.channel_id, result["ts"], reaction.get("emoji"))
 
-                        # Add bot-complete reactions to the bot's response
+                        # Add bot-complete reactions to the bot's response (parallel)
                         bot_complete_reactions = self._get_reactions_for("bot", "complete")
-                        for reaction in bot_complete_reactions:
-                            await self._add_reaction(context.channel_id, result["ts"], reaction.get("emoji"))
+                        if bot_complete_reactions:
+                            await self._add_reactions_parallel(
+                                bot_complete_reactions,
+                                context.channel_id,
+                                result["ts"]
+                            )
 
             finally:
                 # Remove all non-persistent user reactions
@@ -873,6 +891,36 @@ class SlackBot:
             logger.debug(f"Removed reaction :{emoji}: from message {channel_id}:{message_ts}")
         except Exception as e:
             logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
+
+    async def _add_reactions_parallel(
+        self,
+        reactions: list[dict],
+        channel_id: str,
+        message_ts: str,
+    ) -> None:
+        """Add multiple reactions in parallel with error handling.
+
+        This method adds all reactions concurrently using asyncio.gather,
+        which is much faster than sequential addition when multiple reactions
+        are configured.
+
+        Args:
+            reactions: List of reaction config dicts (with "emoji" key)
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+        """
+        if not reactions:
+            return
+
+        try:
+            # Add all reactions concurrently
+            await asyncio.gather(
+                *[self._add_reaction(channel_id, message_ts, r.get("emoji"))
+                  for r in reactions],
+                return_exceptions=True  # Don't fail entire batch if one fails
+            )
+        except Exception as e:
+            logger.error(f"Parallel reactions failed: {e}", exc_info=True)
 
     async def _should_process_message(self, event: dict) -> bool:
         """Determine if we should process this message.
