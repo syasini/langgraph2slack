@@ -6,6 +6,7 @@ forwarded to Slack as they arrive, minimizing latency.
 
 import logging
 import asyncio
+import time
 from typing import Optional
 
 from ..config import MessageContext
@@ -45,6 +46,9 @@ class StreamingHandler(BaseHandler):
         max_image_blocks: int = 5,
         metadata_builder=None,
         message_types: list[str] = None,
+        stream_buffer_time: float = 0.1,
+        stream_buffer_max_size: int = 500,
+        stream_buffer_max_chunks: int = 10,
     ):
         """Initialize streaming handler.
 
@@ -61,6 +65,9 @@ class StreamingHandler(BaseHandler):
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
             message_types: List of message types to process (default: ["AIMessageChunk"])
+            stream_buffer_time: Time in seconds to buffer chunks (default: 0.1)
+            stream_buffer_max_size: Maximum characters to buffer (default: 500)
+            stream_buffer_max_chunks: Maximum chunks to buffer (default: 10)
         """
         # Initialize base class
         super().__init__(
@@ -78,6 +85,11 @@ class StreamingHandler(BaseHandler):
         self.reply_in_thread = reply_in_thread
         self.metadata_builder = metadata_builder
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
+
+        # Streaming buffer configuration
+        self.stream_buffer_time = stream_buffer_time
+        self.stream_buffer_max_size = stream_buffer_max_size
+        self.stream_buffer_max_chunks = stream_buffer_max_chunks
 
         # Slack team_id cache (lazy initialization)
         self._team_id: Optional[str] = None
@@ -184,6 +196,69 @@ class StreamingHandler(BaseHandler):
                 if reaction.get("target") == "bot" and not reaction.get("persist", False):
                     await self._remove_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
 
+    def _should_flush_buffer(
+        self,
+        buffer: list[str],
+        last_flush_time: float,
+    ) -> bool:
+        """Determine if buffer should be flushed to Slack.
+
+        Flushes if any of these conditions are met:
+        1. Enough time has elapsed since last flush
+        2. Buffer size exceeds maximum characters
+        3. Buffer has accumulated too many chunks
+
+        Args:
+            buffer: List of content chunks accumulated
+            last_flush_time: Timestamp of last flush
+
+        Returns:
+            True if buffer should be flushed
+        """
+        if not buffer:
+            return False
+
+        # Calculate metrics
+        buffer_size = sum(len(chunk) for chunk in buffer)
+        time_since_flush = time.time() - last_flush_time
+        chunk_count = len(buffer)
+
+        # Check flush conditions
+        return (
+            time_since_flush >= self.stream_buffer_time or
+            buffer_size >= self.stream_buffer_max_size or
+            chunk_count >= self.stream_buffer_max_chunks
+        )
+
+    async def _flush_buffer(
+        self,
+        buffer: list[str],
+        channel_id: str,
+        stream_ts: str,
+    ) -> None:
+        """Flush accumulated buffer to Slack stream.
+
+        Args:
+            buffer: List of content chunks to flush
+            channel_id: Slack channel ID
+            stream_ts: Stream timestamp
+        """
+        if not buffer:
+            return
+
+        # Combine all buffered chunks
+        combined_content = "".join(buffer)
+
+        # Send to Slack
+        await self._append_to_slack_stream(
+            channel_id=channel_id,
+            stream_ts=stream_ts,
+            content=combined_content,
+        )
+
+        # Clear buffer
+        buffer.clear()
+
     async def _stream_from_langgraph_to_slack(
         self,
         message: str,
@@ -192,12 +267,12 @@ class StreamingHandler(BaseHandler):
         slack_stream_ts: str,
         context: MessageContext,
     ) -> tuple[str, Optional[str]]:
-        """Stream from LangGraph to Slack with immediate forwarding.
+        """Stream from LangGraph to Slack with buffered forwarding.
 
-        THIS IS THE CRITICAL LOW-LATENCY PART:
-        - Iterate over LangGraph stream
-        - Each chunk arrives → immediately send to Slack
-        - No buffering, no waiting
+        Implements time-based buffering to reduce API call overhead:
+        - Accumulate chunks in buffer
+        - Flush based on time, size, or chunk count
+        - Reduces API calls by 5-10x for typical responses
 
         Args:
             message: Transformed message to send to LangGraph
@@ -212,6 +287,10 @@ class StreamingHandler(BaseHandler):
         complete_response = ""
         chunk_count = 0
         run_id = None
+
+        # Initialize buffer for time-based flushing
+        buffer = []
+        last_flush_time = time.time()
 
         # Build metadata if builder is provided
         metadata = await self.metadata_builder(context) if self.metadata_builder else {}
@@ -276,20 +355,34 @@ class StreamingHandler(BaseHandler):
                 # Track complete response for image extraction
                 # IMPORTANT: Accumulate chunks, don't replace!
                 complete_response += content
-                logger.debug(f"Chunk #{chunk_count}: sending {len(content)} chars to Slack (total accumulated: {len(complete_response)})")
+                logger.debug(f"Chunk #{chunk_count}: buffering {len(content)} chars (total accumulated: {len(complete_response)})")
 
-                # CRITICAL: Immediately send to Slack
-                # This is where low latency happens - no waiting!
-                await self._append_to_slack_stream(
-                    channel_id=slack_channel,
-                    stream_ts=slack_stream_ts,
-                    content=content,
-                )
+                # Add to buffer
+                buffer.append(content)
+
+                # Check if we should flush buffer
+                if self._should_flush_buffer(buffer, last_flush_time):
+                    buffer_size = sum(len(c) for c in buffer)
+                    logger.debug(f"Flushing buffer: {len(buffer)} chunks, {buffer_size} chars")
+                    await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
+                    last_flush_time = time.time()
+
+            # Final flush for any remaining content
+            if buffer:
+                logger.debug(f"Final flush: {len(buffer)} chunks remaining")
+                await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
 
             logger.info(f"Stream completed: {chunk_count} chunks, {len(complete_response)} chars")
 
         except Exception as e:
             logger.error(f"Error during streaming: {e}", exc_info=True)
+            # Flush any buffered content before showing error
+            try:
+                if buffer:
+                    await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
+            except:
+                pass  # Best effort
+
             # Try to append error message to stream
             try:
                 await self._append_to_slack_stream(

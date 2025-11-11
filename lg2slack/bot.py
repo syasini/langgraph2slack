@@ -57,6 +57,9 @@ class SlackBot:
         processing_reaction: Optional[str] = None,
         reactions: Optional[list[dict]] = None,
         message_types: Optional[list[str]] = None,
+        stream_buffer_time: float = 0.1,
+        stream_buffer_max_size: int = 500,
+        stream_buffer_max_chunks: int = 10,
     ):
         """Initialize SlackBot.
 
@@ -99,6 +102,13 @@ class SlackBot:
                 - "system": SystemMessage (system prompts)
                 - "tool": ToolMessage (tool execution results)
                 Example: message_types=["AIMessageChunk", "tool"] to stream assistant responses and tool results
+            stream_buffer_time: Time in seconds to buffer chunks before flushing to Slack (default: 0.1).
+                Reduces API call overhead by batching multiple chunks. Lower = more responsive but more API calls.
+                Recommended: 0.05-0.2 seconds.
+            stream_buffer_max_size: Maximum characters to buffer before force-flushing (default: 500).
+                Prevents accumulating too much text in buffer. Higher = fewer API calls but longer perceived delay.
+            stream_buffer_max_chunks: Maximum number of chunks to buffer before force-flushing (default: 10).
+                Prevents accumulating too many small chunks. Higher = fewer API calls but longer perceived delay.
         """
         logger.info("Initializing SlackBot...")
 
@@ -162,6 +172,9 @@ class SlackBot:
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
                 message_types=self.message_types,
+                stream_buffer_time=stream_buffer_time,
+                stream_buffer_max_size=stream_buffer_max_size,
+                stream_buffer_max_chunks=stream_buffer_max_chunks,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:
