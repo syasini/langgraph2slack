@@ -47,7 +47,6 @@ class StreamingHandler(BaseHandler):
         metadata_builder=None,
         message_types: list[str] = None,
         stream_buffer_time: float = 0.1,
-        stream_buffer_max_size: int = 500,
         stream_buffer_max_chunks: int = 10,
     ):
         """Initialize streaming handler.
@@ -65,9 +64,10 @@ class StreamingHandler(BaseHandler):
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
             message_types: List of message types to process (default: ["AIMessageChunk"])
-            stream_buffer_time: Time in seconds to buffer chunks (default: 0.1)
-            stream_buffer_max_size: Maximum characters to buffer (default: 500)
-            stream_buffer_max_chunks: Maximum chunks to buffer (default: 10)
+            stream_buffer_time: Time in seconds to buffer chunks before flushing (default: 0.1).
+                Buffer flushes when EITHER this time elapses OR stream_buffer_max_chunks is reached.
+            stream_buffer_max_chunks: Maximum chunks to buffer before force-flushing (default: 10).
+                Buffer flushes when EITHER stream_buffer_time elapses OR this limit is reached.
         """
         # Initialize base class
         super().__init__(
@@ -88,7 +88,6 @@ class StreamingHandler(BaseHandler):
 
         # Streaming buffer configuration
         self.stream_buffer_time = stream_buffer_time
-        self.stream_buffer_max_size = stream_buffer_max_size
         self.stream_buffer_max_chunks = stream_buffer_max_chunks
 
         # Slack team_id cache (lazy initialization)
@@ -236,10 +235,12 @@ class StreamingHandler(BaseHandler):
     ) -> bool:
         """Determine if buffer should be flushed to Slack.
 
-        Flushes if any of these conditions are met:
-        1. Enough time has elapsed since last flush
-        2. Buffer size exceeds maximum characters
-        3. Buffer has accumulated too many chunks
+        Flushes when EITHER condition is met:
+        1. Enough time has elapsed since last flush (stream_buffer_time)
+        2. Buffer has accumulated too many chunks (stream_buffer_max_chunks)
+
+        These work together as safety limits - whichever is reached first triggers the flush.
+        Typical behavior: time limit triggers for normal streaming, chunk limit catches edge cases.
 
         Args:
             buffer: List of content chunks accumulated
@@ -251,16 +252,13 @@ class StreamingHandler(BaseHandler):
         if not buffer:
             return False
 
-        # Calculate metrics
-        buffer_size = sum(len(chunk) for chunk in buffer)
+        # Calculate time elapsed
         time_since_flush = time.time() - last_flush_time
-        chunk_count = len(buffer)
 
-        # Check flush conditions
+        # Check flush conditions (time OR chunk count)
         return (
             time_since_flush >= self.stream_buffer_time or
-            buffer_size >= self.stream_buffer_max_size or
-            chunk_count >= self.stream_buffer_max_chunks
+            len(buffer) >= self.stream_buffer_max_chunks
         )
 
     async def _flush_buffer(
@@ -395,8 +393,7 @@ class StreamingHandler(BaseHandler):
 
                 # Check if we should flush buffer
                 if self._should_flush_buffer(buffer, last_flush_time):
-                    buffer_size = sum(len(c) for c in buffer)
-                    logger.debug(f"Flushing buffer: {len(buffer)} chunks, {buffer_size} chars")
+                    logger.debug(f"Flushing buffer: {len(buffer)} chunks")
                     await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
                     last_flush_time = time.time()
 
