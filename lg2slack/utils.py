@@ -6,6 +6,8 @@ Helper functions for message formatting, markdown conversion, and event detectio
 import re
 from typing import List, Dict
 
+from loguru import logger
+
 
 def is_bot_mention(text: str, bot_user_id: str) -> bool:
     """Check if bot is mentioned in a message.
@@ -132,9 +134,6 @@ def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
         >>> extract_markdown_images("Here's a chart: ![Sales Chart](https://example.com/chart.png)")
         [{'type': 'image', 'image_url': 'https://example.com/chart.png', 'alt_text': 'Sales Chart'}]
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
     # Pattern matches: ![alt text](url)
     # Group 1: alt text (can be empty)
     # Group 2: url - uses balanced parentheses pattern to handle URLs with parens
