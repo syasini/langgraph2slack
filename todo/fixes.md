@@ -7,7 +7,7 @@ This file tracks critical bugs and code smells that need fixing.
 ## 🔴 Critical Priority
 
 ### ✅ Issue #1: Duplicate Reaction Methods
-**Status:** Pending
+**Status:** ✅ Complete (commit: b8f4223)
 **Branch:** `claude/refactor-reaction-mixin-011CUomKh1oKXEihWTyV7Sra`
 **Severity:** HIGH
 **Files Affected:** `bot.py` (lines 867-941), `handlers/stream.py` (lines 607-681)
@@ -88,7 +88,7 @@ def extract_markdown_images(text: str, ...):
 
 ## 📋 Checklist
 
-- [ ] Issue #1: Extract duplicate reaction methods
+- [x] Issue #1: Extract duplicate reaction methods
 - [ ] Issue #2: Move import re to module level
 - [ ] Issue #3: Switch to loguru logging
 

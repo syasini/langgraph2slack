@@ -6,6 +6,7 @@ forwarded to Slack as they arrive, minimizing latency.
 
 import logging
 import asyncio
+import re
 import time
 from typing import Optional
 
@@ -547,7 +548,6 @@ class StreamingHandler(BaseHandler):
                 await asyncio.sleep(0.5)
 
                 # Remove image markdown from text (since we're showing them as image blocks)
-                import re
                 text_without_images = re.sub(r"!\[([^\]]*)\]\(.+?\)", "", complete_response)
 
                 # Convert to Slack block format (for_blocks=True converts **bold** -> *bold*, etc.)
