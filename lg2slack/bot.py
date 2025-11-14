@@ -167,6 +167,10 @@ class SlackBot:
         # Initialize reaction mixin for shared reaction operations
         self._reactions = ReactionMixin(self.slack_app.client)
 
+        # Validate buffer configuration parameters (if streaming is enabled)
+        if streaming:
+            self._validate_buffer_config(stream_buffer_time, stream_buffer_max_chunks)
+
         # Create appropriate handler based on streaming setting
         if self.streaming_enabled:
             self.handler = StreamingHandler(
@@ -360,6 +364,44 @@ class SlackBot:
             config.SLACK_SIGNING_SECRET = SecretStr(slack_signing_secret)
 
         return config
+
+    def _validate_buffer_config(
+        self,
+        stream_buffer_time: float,
+        stream_buffer_max_chunks: int,
+    ) -> None:
+        """Validate buffer configuration parameters.
+
+        Args:
+            stream_buffer_time: Time in seconds to buffer chunks
+            stream_buffer_max_chunks: Maximum chunks to buffer
+
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        # Validate stream_buffer_time
+        if stream_buffer_time <= 0:
+            raise ValueError(
+                f"stream_buffer_time must be positive, got {stream_buffer_time}"
+            )
+        if stream_buffer_time > 5.0:
+            logger.warning(
+                f"stream_buffer_time={stream_buffer_time}s is very high. "
+                "This may cause noticeable lag in streaming responses. "
+                "Recommended range: 0.05-0.2 seconds."
+            )
+
+        # Validate stream_buffer_max_chunks
+        if stream_buffer_max_chunks < 1:
+            raise ValueError(
+                f"stream_buffer_max_chunks must be >= 1, got {stream_buffer_max_chunks}"
+            )
+        if stream_buffer_max_chunks > 100:
+            logger.warning(
+                f"stream_buffer_max_chunks={stream_buffer_max_chunks} is very high. "
+                "This may cause memory issues or delayed flushing. "
+                "Recommended range: 5-20 chunks."
+            )
 
     def _normalize_reactions(
         self,
