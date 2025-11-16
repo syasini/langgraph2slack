@@ -57,6 +57,8 @@ class SlackBot:
         processing_reaction: Optional[str] = None,
         reactions: Optional[list[dict]] = None,
         message_types: Optional[list[str]] = None,
+        stream_buffer_time: float = 0.1,
+        stream_buffer_max_chunks: int = 10,
     ):
         """Initialize SlackBot.
 
@@ -99,6 +101,20 @@ class SlackBot:
                 - "system": SystemMessage (system prompts)
                 - "tool": ToolMessage (tool execution results)
                 Example: message_types=["AIMessageChunk", "tool"] to stream assistant responses and tool results
+            stream_buffer_time: Time in seconds to buffer chunks before flushing to Slack (default: 0.1).
+                Buffers chunks for this duration before sending to reduce API call overhead.
+                The buffer flushes when EITHER this time elapses OR stream_buffer_max_chunks is reached
+                (whichever happens first). Lower values = more responsive but more API calls.
+                Recommended range: 0.05-0.2 seconds.
+                Example: 0.05 = flush every 50ms (more API calls, lower latency)
+                         0.2 = flush every 200ms (fewer API calls, slightly higher latency)
+            stream_buffer_max_chunks: Maximum chunks to buffer before force-flushing (default: 10).
+                Safety limit to prevent accumulating too many small chunks between time-based flushes.
+                The buffer flushes when EITHER stream_buffer_time elapses OR this limit is reached
+                (whichever happens first). Useful when LangGraph sends many tiny chunks rapidly.
+                Recommended range: 5-20 chunks.
+                Example: 5 = flush after 5 chunks (more API calls, handles tiny chunks)
+                         20 = flush after 20 chunks (fewer API calls, batches more aggressively)
         """
         logger.info("Initializing SlackBot...")
 
@@ -162,6 +178,8 @@ class SlackBot:
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
                 message_types=self.message_types,
+                stream_buffer_time=stream_buffer_time,
+                stream_buffer_max_chunks=stream_buffer_max_chunks,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:

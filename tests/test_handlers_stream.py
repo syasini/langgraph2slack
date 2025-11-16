@@ -289,14 +289,17 @@ class TestStreamFromLangGraphToSlack:
         # Verify run_id was captured from metadata chunk
         assert run_id == "test-run-123"
 
-        # Verify appendStream was called 3 times (once per message chunk)
-        assert basic_streaming_handler.slack_client.client.chat_appendStream.call_count == 3
+        # With buffering, chunks are batched (fewer API calls than chunks)
+        # In tests, all 3 chunks arrive quickly so they're buffered together
+        call_count = basic_streaming_handler.slack_client.client.chat_appendStream.call_count
+        assert call_count >= 1, "Should have at least one API call"
+        assert call_count <= 3, "Should not exceed original chunk count"
 
-        # Verify chunks were sent in order
-        calls = basic_streaming_handler.slack_client.client.chat_appendStream.call_args_list
-        assert calls[0].kwargs["markdown_text"] == "Hello"
-        assert calls[1].kwargs["markdown_text"] == " world"
-        assert calls[2].kwargs["markdown_text"] == "!"
+        # Verify complete content was sent (might be in one or multiple calls)
+        all_sent_content = ""
+        for call in basic_streaming_handler.slack_client.client.chat_appendStream.call_args_list:
+            all_sent_content += call.kwargs["markdown_text"]
+        assert all_sent_content == "Hello world!"
 
     @pytest.mark.asyncio
     async def test_stream_captures_run_id_from_metadata(self, mock_langgraph_client, mock_slack_client, sample_context):
@@ -819,7 +822,8 @@ class TestProcessMessage:
         # Verify the flow: get_team_id, start, stream chunks, stop
         basic_streaming_handler.slack_client.client.auth_test.assert_called_once()
         basic_streaming_handler.slack_client.client.chat_startStream.assert_called_once()
-        assert basic_streaming_handler.slack_client.client.chat_appendStream.call_count == 3
+        # With buffering, chunks are batched (fewer API calls)
+        assert basic_streaming_handler.slack_client.client.chat_appendStream.call_count >= 1
         basic_streaming_handler.slack_client.client.chat_stopStream.assert_called_once()
 
     @pytest.mark.asyncio
