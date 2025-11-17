@@ -37,9 +37,9 @@ Break into smaller methods:
 
 ## 💡 Medium Value Enhancements
 
-### Opportunity #2: Simplify Buffer Flush Logic
-**Status:** Backlog
-**Branch:** TBD
+### ✅ Opportunity #2: Simplify Buffer Flush Logic
+**Status:** ✅ Complete (commit: b964c96)
+**Branch:** `claude/simplify-buffer-flush-011CUomKh1oKXEihWTyV7Sra`
 **Priority:** MEDIUM
 **Files Affected:** `handlers/stream.py` (lines 361-365)
 
@@ -79,9 +79,9 @@ async def _flush_buffer_and_return_time(self, buffer, channel_id, stream_ts):
 
 ---
 
-### Opportunity #3: Add Configuration Validation
-**Status:** Backlog
-**Branch:** TBD
+### ✅ Opportunity #3: Add Configuration Validation
+**Status:** ✅ Complete (commit: ac95067)
+**Branch:** `claude/add-config-validation-011CUomKh1oKXEihWTyV7Sra`
 **Priority:** MEDIUM
 **Files Affected:** `bot.py` (`__init__` method)
 
@@ -121,9 +121,9 @@ def _validate_buffer_config(self, buffer_time, max_chunks):
 
 ## 📋 Checklist
 
-- [ ] Opportunity #1: Refactor _normalize_reactions()
-- [ ] Opportunity #2: Simplify buffer flush logic
-- [ ] Opportunity #3: Add configuration validation
+- [x] Opportunity #1: Refactor _normalize_reactions()
+- [x] Opportunity #2: Simplify buffer flush logic
+- [x] Opportunity #3: Add configuration validation
 
 ---
 
