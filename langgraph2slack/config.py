@@ -4,11 +4,12 @@ This module handles all configuration loading from environment variables
 with validation and type safety.
 """
 
-from typing import Optional, Any
+import logging
+from typing import Optional
+
+from dotenv import find_dotenv
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from dotenv import find_dotenv
-import logging
 
 logger = logging.getLogger(__name__)
 

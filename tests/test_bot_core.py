@@ -10,8 +10,8 @@ This completes testing of the core orchestration logic.
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from lg2slack.bot import SlackBot
-from lg2slack.config import MessageContext
+from langgraph2slack.bot import SlackBot
+from langgraph2slack.config import MessageContext
 
 
 # ============================================================================

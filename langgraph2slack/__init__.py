@@ -1,11 +1,11 @@
-"""lg2slack - Simple LangGraph to Slack integration.
+"""langgraph2slack - Simple LangGraph to Slack integration.
 
 This package provides an easy way to connect LangGraph applications to Slack
 with minimal configuration. Just create a SlackBot, optionally add transformers,
 and export the FastAPI app to langgraph.json.
 
 Example:
-    from lg2slack import SlackBot
+    from langgraph2slack import SlackBot
 
     bot = SlackBot()
 
@@ -22,8 +22,9 @@ from .config import BotConfig, MessageContext
 # Version is dynamically loaded from package metadata (pyproject.toml)
 # Use `uv version --bump patch|minor|major` to update version
 try:
-    from importlib.metadata import version, PackageNotFoundError
-    __version__ = version("lg2slack")
+    from importlib.metadata import PackageNotFoundError, version
+
+    __version__ = version("langgraph2slack")
 except PackageNotFoundError:
     # Fallback for development (package not installed)
     __version__ = "0.0.0.dev"

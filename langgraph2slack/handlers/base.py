@@ -5,13 +5,12 @@ to reduce code duplication and ensure consistency.
 """
 
 import logging
-import re
 import uuid
-from typing import List, Dict
+from typing import Dict, List
 
 from ..config import MessageContext
 from ..transformers import TransformerChain
-from ..utils import extract_markdown_images, create_feedback_block
+from ..utils import create_feedback_block, extract_markdown_images
 
 logger = logging.getLogger(__name__)
 

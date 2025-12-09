@@ -18,9 +18,9 @@ dependencies = [
     # Tavily search - using new langchain-tavily package
     "langchain-tavily>=0.2.0",
 
-    # lg2slack - for local dev, install from parent directory
-    # After publishing to PyPI, this would be: "lg2slack>=0.1.0"
-    "lg2slack @ file:///Users/siavashyasini/MyDrive/projects/lg2slack",
+    # langgraph2slack - for local dev, install from parent directory
+    # After publishing to PyPI, this would be: "langgraph2slack>=0.1.0"
+    "langgraph2slack @ file:///Users/siavashyasini/MyDrive/projects/lg2slack",
 ]
 
 [project.optional-dependencies]

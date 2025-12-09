@@ -4,16 +4,16 @@ Handles input and output transformers that process messages before/after
 sending to LangGraph.
 """
 
-from typing import Callable, List, Awaitable, Union
-from .config import MessageContext
 import inspect
+from typing import Awaitable, Callable, List, Union
+
+from .config import MessageContext
 
 # Type alias for transformer functions
 # Signature: async def transformer(message: str, context: MessageContext) -> str
 # Or: async def transformer(message: str) -> str (context optional)
 TransformerFunc = Union[
-    Callable[[str, MessageContext], Awaitable[str]],
-    Callable[[str], Awaitable[str]]
+    Callable[[str, MessageContext], Awaitable[str]], Callable[[str], Awaitable[str]]
 ]
 
 

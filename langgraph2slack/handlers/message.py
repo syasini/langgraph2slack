@@ -5,7 +5,7 @@ complete LangGraph response before sending to Slack.
 """
 
 import logging
-from typing import Optional, Tuple, List, Dict
+from typing import Dict, List, Optional, Tuple
 
 from ..config import MessageContext
 from ..transformers import TransformerChain
@@ -88,7 +88,9 @@ class MessageHandler(BaseHandler):
             - thread_id: LangGraph thread ID
             - run_id: LangGraph run ID for feedback
         """
-        logger.info(f"Processing message from user {context.user_id} in channel {context.channel_id}")
+        logger.info(
+            f"Processing message from user {context.user_id} in channel {context.channel_id}"
+        )
 
         # Step 1: Apply input transformers
         transformed_input = await self._apply_input_transforms(message, context)
@@ -99,7 +101,9 @@ class MessageHandler(BaseHandler):
         logger.info(f"Using LangGraph thread: {langgraph_thread}")
 
         # Step 3: Send to LangGraph and wait for complete response
-        langgraph_response, run_id = await self._invoke_langgraph(transformed_input, langgraph_thread, context)
+        langgraph_response, run_id = await self._invoke_langgraph(
+            transformed_input, langgraph_thread, context
+        )
 
         # Step 4: Extract the actual message content
         response_text = self._extract_message_content(langgraph_response)
@@ -117,7 +121,9 @@ class MessageHandler(BaseHandler):
 
         return slack_formatted, blocks, langgraph_thread, run_id
 
-    async def _invoke_langgraph(self, message: str, thread_id: str, context: MessageContext) -> Tuple[dict, str]:
+    async def _invoke_langgraph(
+        self, message: str, thread_id: str, context: MessageContext
+    ) -> Tuple[dict, str]:
         """Invoke LangGraph and wait for complete response.
 
         Args:
@@ -141,9 +147,7 @@ class MessageHandler(BaseHandler):
             run = await self.client.runs.create(
                 thread_id=thread_id,
                 assistant_id=self.assistant_id,
-                input={
-                    "messages": [{"role": "user", "content": message}]
-                },
+                input={"messages": [{"role": "user", "content": message}]},
                 if_not_exists="create",
                 metadata=metadata,
             )

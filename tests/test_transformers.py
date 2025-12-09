@@ -1,4 +1,4 @@
-"""Unit tests for lg2slack.transformers module.
+"""Unit tests for langgraph2slack.transformers module.
 
 Tests TransformerChain functionality including:
 - Adding transformers
@@ -8,8 +8,8 @@ Tests TransformerChain functionality including:
 """
 
 import pytest
-from lg2slack.transformers import TransformerChain
-from lg2slack.config import MessageContext
+from langgraph2slack.transformers import TransformerChain
+from langgraph2slack.config import MessageContext
 
 
 # ============================================================================

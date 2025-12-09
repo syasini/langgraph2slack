@@ -1,6 +1,6 @@
-# lg2slack
+# langgraph2slack
 
-[![PyPI version](https://badge.fury.io/py/lg2slack.svg)](https://badge.fury.io/py/lg2slack)
+[![PyPI version](https://badge.fury.io/py/langgraph2slack.svg)](https://badge.fury.io/py/langgraph2slack)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -9,7 +9,7 @@ Simple, minimal package to connect LangGraph applications to Slack with just a f
 ## Installation
 
 ```bash
-pip install lg2slack
+pip install langgraph2slack
 ```
 
 ## Quick Start
@@ -49,7 +49,7 @@ Create a `slack/server.py` file in your project directory:
 
 ```python
 # slack/server.py
-from lg2slack import SlackBot
+from langgraph2slack import SlackBot
 
 bot = SlackBot()
 
@@ -74,7 +74,7 @@ ASSISTANT_ID=my-assistant
 ```
 You can find `SLACK_SIGNING_SECRET` and `SLACK_BOT_TOKEN` in the following pages on `https://api.slack.com/apps`:
 
-![slack_app_creds](https://raw.githubusercontent.com/syasini/lg2slack/main/media/slack_secrets_page.png)
+![slack_app_creds](https://raw.githubusercontent.com/syasini/langgraph2slack/main/media/slack_secrets_page.png)
 
 
 ### 4. Configure LangGraph Deployment
@@ -83,7 +83,7 @@ Add your agent and Slack server paths to `langgraph.json`:
 
 ```json
 {
-  "dependencies": ["lg2slack", "."],
+  "dependencies": ["langgraph2slack", "."],
   "graphs": {
     "my-assistant": "./agent.py:app"
   },
@@ -96,7 +96,7 @@ Add your agent and Slack server paths to `langgraph.json`:
 
 ## Local Testing
 
-![local_demo](https://raw.githubusercontent.com/syasini/lg2slack/main/media/local_demo.gif)
+![local_demo](https://raw.githubusercontent.com/syasini/langgraph2slack/main/media/local_demo.gif)
 
 Before deploying to production, test your bot locally using ngrok.
 
@@ -204,7 +204,7 @@ Your bot is now live! Chat with it by:
 ## Advanced Usage
 
 ### Configuration Options
-![advanced_features](https://raw.githubusercontent.com/syasini/lg2slack/main/media/advanced_features_demo.gif)
+![advanced_features](https://raw.githubusercontent.com/syasini/langgraph2slack/main/media/advanced_features_demo.gif)
 
 
 The `SlackBot` class accepts many parameters to customize behavior:
@@ -250,7 +250,7 @@ bot = SlackBot(
 Customize message processing with transformers:
 
 ```python
-from lg2slack import SlackBot
+from langgraph2slack import SlackBot
 
 bot = SlackBot()
 
@@ -370,9 +370,9 @@ bot = SlackBot(
 ### Architecture
 
 ```
-Slack [user] → lg2slack → [INPUT TRANSFORMERS] → LangGraph [HumanMessage]
+Slack [user] → langgraph2slack → [INPUT TRANSFORMERS] → LangGraph [HumanMessage]
                                                      ↓
-Slack [bot]  ← lg2slack ← [OUTPUT TRANSFORMERS] ← LangGraph [AIMessage]
+Slack [bot]  ← langgraph2slack ← [OUTPUT TRANSFORMERS] ← LangGraph [AIMessage]
 ```
 
 ### Message Flow
@@ -388,7 +388,7 @@ Slack [bot]  ← lg2slack ← [OUTPUT TRANSFORMERS] ← LangGraph [AIMessage]
 9. **Feedback and Metadata** optionally stored in LangSmith if enabled in `.env`
 
 ### Streaming vs Non-Streaming
-lg2slack assumes you are generating streaming responses from LangGraph, but you have the option to show them on Slack in streaming on non-streaming modes.
+langgraph2slack assumes you are generating streaming responses from LangGraph, but you have the option to show them on Slack in streaming on non-streaming modes.
 
 **Streaming mode (default):**
 - Low-latency streaming
@@ -406,11 +406,11 @@ bot = SlackBot(streaming=False)
 
 ## Examples
 
-Check out the [`examples/plant_bot`](https://github.com/syasini/lg2slack/tree/main/examples/plant_bot) directory for a complete working example:
+Check out the [`examples/plant_bot`](https://github.com/syasini/langgraph2slack/tree/main/examples/plant_bot) directory for a complete working example:
 
-- **[plant_agent.py](https://github.com/syasini/lg2slack/blob/main/examples/plant_bot/plant_agent.py)** - LangGraph agent with conditional image search
-- **[slack_server.py](https://github.com/syasini/lg2slack/blob/main/examples/plant_bot/slack_server.py)** - SlackBot setup with transformers
-- **[langgraph.json](https://github.com/syasini/lg2slack/blob/main/examples/plant_bot/langgraph.json)** - Simple deployment configuration
+- **[plant_agent.py](https://github.com/syasini/langgraph2slack/blob/main/examples/plant_bot/plant_agent.py)** - LangGraph agent with conditional image search
+- **[slack_server.py](https://github.com/syasini/langgraph2slack/blob/main/examples/plant_bot/slack_server.py)** - SlackBot setup with transformers
+- **[langgraph.json](https://github.com/syasini/langgraph2slack/blob/main/examples/plant_bot/langgraph.json)** - Simple deployment configuration
 
 ## Requirements
 

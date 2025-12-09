@@ -1,1 +1,1 @@
-"""Test suite for lg2slack package."""
+"""Test suite for langgraph2slack package."""

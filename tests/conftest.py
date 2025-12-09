@@ -1,11 +1,11 @@
-"""Shared pytest fixtures for lg2slack tests.
+"""Shared pytest fixtures for langgraph2slack tests.
 
-This module provides reusable fixtures for testing lg2slack components.
+This module provides reusable fixtures for testing langgraph2slack components.
 Fixtures are automatically discovered by pytest and available to all test files.
 """
 
 import pytest
-from lg2slack.config import MessageContext
+from langgraph2slack.config import MessageContext
 
 
 # ============================================================================

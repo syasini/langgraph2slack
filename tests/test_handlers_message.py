@@ -1,4 +1,4 @@
-"""Unit tests for lg2slack.handlers.message module.
+"""Unit tests for langgraph2slack.handlers.message module.
 
 Tests MessageHandler functionality including:
 - Message content extraction from various LangGraph response formats
@@ -9,9 +9,9 @@ Tests MessageHandler functionality including:
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock
-from lg2slack.handlers.message import MessageHandler
-from lg2slack.transformers import TransformerChain
-from lg2slack.config import MessageContext
+from langgraph2slack.handlers.message import MessageHandler
+from langgraph2slack.transformers import TransformerChain
+from langgraph2slack.config import MessageContext
 
 
 # ============================================================================

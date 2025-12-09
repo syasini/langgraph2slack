@@ -1,4 +1,4 @@
-"""Unit tests for lg2slack.utils module.
+"""Unit tests for langgraph2slack.utils module.
 
 Tests utility functions for Slack integration including:
 - Markdown conversion (clean_markdown)
@@ -8,7 +8,7 @@ Tests utility functions for Slack integration including:
 """
 
 import pytest
-from lg2slack.utils import (
+from langgraph2slack.utils import (
     clean_markdown,
     extract_markdown_images,
     is_bot_mention,
