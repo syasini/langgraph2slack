@@ -4,22 +4,23 @@ This is the primary interface users interact with. It creates the FastAPI app,
 sets up Slack handlers, and coordinates between Slack and LangGraph.
 """
 
-import logging
 import asyncio
 import json
-from typing import Optional, Callable, Dict
+import logging
+from typing import Callable, Dict, Optional
+
 from fastapi import FastAPI, Request
-from slack_bolt.async_app import AsyncApp
-from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from langgraph_sdk import get_client
 from langsmith import Client
 from pydantic import SecretStr
+from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+from slack_bolt.async_app import AsyncApp
 
 from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
-from .transformers import TransformerChain
-from .utils import is_bot_mention, is_dm, create_feedback_modal, extract_feedback_text
 from .mixins import ReactionMixin
+from .transformers import TransformerChain
+from .utils import create_feedback_modal, extract_feedback_text, is_bot_mention, is_dm
 
 logger = logging.getLogger(__name__)
 
@@ -392,13 +393,17 @@ class SlackBot:
                 )
             else:
                 # Convert legacy format to new format
-                normalized.append({
-                    "emoji": processing_reaction,
-                    "target": "user",
-                    "when": "processing",
-                    "persist": False,
-                })
-                logger.info(f"Converted processing_reaction='{processing_reaction}' to new reactions format")
+                normalized.append(
+                    {
+                        "emoji": processing_reaction,
+                        "target": "user",
+                        "when": "processing",
+                        "persist": False,
+                    }
+                )
+                logger.info(
+                    f"Converted processing_reaction='{processing_reaction}' to new reactions format"
+                )
                 return normalized
 
         # Use new reactions format if provided
@@ -406,18 +411,26 @@ class SlackBot:
             for idx, reaction in enumerate(reactions):
                 # Validate required fields
                 if not isinstance(reaction, dict):
-                    raise ValueError(f"Reaction config at index {idx} must be a dict, got {type(reaction)}")
+                    raise ValueError(
+                        f"Reaction config at index {idx} must be a dict, got {type(reaction)}"
+                    )
 
                 emoji = reaction.get("emoji")
                 target = reaction.get("target")
                 when = reaction.get("when")
 
                 if not emoji:
-                    raise ValueError(f"Reaction config at index {idx} missing required field 'emoji'")
+                    raise ValueError(
+                        f"Reaction config at index {idx} missing required field 'emoji'"
+                    )
                 if not target:
-                    raise ValueError(f"Reaction config at index {idx} missing required field 'target'")
+                    raise ValueError(
+                        f"Reaction config at index {idx} missing required field 'target'"
+                    )
                 if not when:
-                    raise ValueError(f"Reaction config at index {idx} missing required field 'when'")
+                    raise ValueError(
+                        f"Reaction config at index {idx} missing required field 'when'"
+                    )
 
                 # Validate values
                 if target not in ["user", "bot"]:
@@ -437,12 +450,14 @@ class SlackBot:
                 default_persist = when == "complete"
 
                 # Add normalized config with when-dependent persist default
-                normalized.append({
-                    "emoji": emoji,
-                    "target": target,
-                    "when": when,
-                    "persist": reaction.get("persist", default_persist),
-                })
+                normalized.append(
+                    {
+                        "emoji": emoji,
+                        "target": target,
+                        "when": when,
+                        "persist": reaction.get("persist", default_persist),
+                    }
+                )
 
         return normalized
 
@@ -456,10 +471,7 @@ class SlackBot:
         Returns:
             List of matching reaction configs
         """
-        return [
-            r for r in self.reactions
-            if r.get("target") == target and r.get("when") == when
-        ]
+        return [r for r in self.reactions if r.get("target") == target and r.get("when") == when]
 
     async def _ensure_slack_metadata(self) -> None:
         """Ensure Slack metadata (bot_user_id, team_id) is cached.
@@ -481,7 +493,9 @@ class SlackBot:
             self._bot_user_id = auth_info["user_id"]
             self._team_id = auth_info["team_id"]
             self._slack_metadata_initialized = True
-            logger.info(f"Cached Slack metadata: bot_user_id={self._bot_user_id}, team_id={self._team_id}")
+            logger.info(
+                f"Cached Slack metadata: bot_user_id={self._bot_user_id}, team_id={self._team_id}"
+            )
 
     def _create_fastapi_app(self) -> FastAPI:
         """Create FastAPI app with Slack routes.
@@ -491,7 +505,7 @@ class SlackBot:
         Returns:
             FastAPI app instance with /events/slack endpoint
         """
-        app = FastAPI(title="lg2slack")
+        app = FastAPI(title="langgraph2slack")
 
         # Create Slack request handler
         handler = AsyncSlackRequestHandler(self.slack_app)
@@ -576,9 +590,7 @@ class SlackBot:
             if user_processing_reactions:
                 self._create_background_task(
                     self._reactions.add_parallel(
-                        user_processing_reactions,
-                        context.channel_id,
-                        context.message_ts
+                        user_processing_reactions, context.channel_id, context.message_ts
                     )
                 )
 
@@ -598,9 +610,7 @@ class SlackBot:
                     user_complete_reactions = self._get_reactions_for("user", "complete")
                     if user_complete_reactions:
                         await self._reactions.add_parallel(
-                            user_complete_reactions,
-                            context.channel_id,
-                            context.message_ts
+                            user_complete_reactions, context.channel_id, context.message_ts
                         )
 
                     # Store mapping for feedback
@@ -610,9 +620,11 @@ class SlackBot:
                             "thread_id": thread_id,
                             "run_id": run_id,
                         }
-                        logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
+                        logger.info(
+                            f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}"
+                        )
                     else:
-                        logger.warning(f"No run_id captured for streaming message")
+                        logger.warning("No run_id captured for streaming message")
 
                     success = True
 
@@ -636,28 +648,35 @@ class SlackBot:
                             text="Thinking...",
                             thread_ts=thread_ts,
                         )
-                        placeholder_ts = placeholder_result.get("ts") if placeholder_result else None
+                        placeholder_ts = (
+                            placeholder_result.get("ts") if placeholder_result else None
+                        )
 
                         # Add bot-processing reactions to placeholder
                         if placeholder_ts:
                             for reaction in bot_processing_reactions:
-                                await self._reactions.add(context.channel_id, placeholder_ts, reaction.get("emoji"))
+                                await self._reactions.add(
+                                    context.channel_id, placeholder_ts, reaction.get("emoji")
+                                )
 
                     logger.info("Non-streaming mode: calling handler.process_message")
-                    response_text, blocks, thread_id, run_id = await self.handler.process_message(message_text, context)
-                    logger.info(f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}")
+                    response_text, blocks, thread_id, run_id = await self.handler.process_message(
+                        message_text, context
+                    )
+                    logger.info(
+                        f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}"
+                    )
 
-                    logger.info(f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks")
+                    logger.info(
+                        f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks"
+                    )
 
                     # If we have blocks, prepend a text section block with the response
                     if blocks:
                         # Create a text section block for the response
                         text_block = {
                             "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": response_text
-                            }
+                            "text": {"type": "mrkdwn", "text": response_text},
                         }
                         # Prepend text block to the beginning
                         blocks = [text_block] + blocks
@@ -679,8 +698,12 @@ class SlackBot:
                             # If error mentions invalid_blocks or downloading image, retry without image blocks
                             error_str = str(e)
                             if "invalid_blocks" in error_str or "downloading image" in error_str:
-                                logger.warning(f"Image blocks failed ({error_str}), retrying without images")
-                                blocks_without_images = [b for b in blocks if b.get("type") != "image"]
+                                logger.warning(
+                                    f"Image blocks failed ({error_str}), retrying without images"
+                                )
+                                blocks_without_images = [
+                                    b for b in blocks if b.get("type") != "image"
+                                ]
                                 await self.slack_app.client.chat_update(
                                     channel=context.channel_id,
                                     ts=placeholder_ts,
@@ -699,20 +722,28 @@ class SlackBot:
                                 thread_ts=thread_ts,
                                 blocks=blocks if blocks else None,
                             )
-                            logger.info(f"Message sent successfully, result ts={result.get('ts') if result else 'None'}")
+                            logger.info(
+                                f"Message sent successfully, result ts={result.get('ts') if result else 'None'}"
+                            )
                         except Exception as e:
                             # If error mentions invalid_blocks or downloading image, retry without image blocks
                             error_str = str(e)
                             if "invalid_blocks" in error_str or "downloading image" in error_str:
-                                logger.warning(f"Image blocks failed ({error_str}), retrying without images")
+                                logger.warning(
+                                    f"Image blocks failed ({error_str}), retrying without images"
+                                )
                                 # Keep text block and feedback block, remove image blocks
-                                blocks_without_images = [b for b in blocks if b.get("type") != "image"]
+                                blocks_without_images = [
+                                    b for b in blocks if b.get("type") != "image"
+                                ]
                                 result = await say(
                                     text=response_text,
                                     thread_ts=thread_ts,
                                     blocks=blocks_without_images if blocks_without_images else None,
                                 )
-                                logger.info(f"Message sent without images, result ts={result.get('ts') if result else 'None'}")
+                                logger.info(
+                                    f"Message sent without images, result ts={result.get('ts') if result else 'None'}"
+                                )
                             else:
                                 # Some other error, re-raise it
                                 raise
@@ -724,17 +755,17 @@ class SlackBot:
                             "thread_id": thread_id,
                             "run_id": run_id,
                         }
-                        logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
+                        logger.info(
+                            f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}"
+                        )
                     else:
-                        logger.warning(f"No run_id captured for non-streaming message")
+                        logger.warning("No run_id captured for non-streaming message")
 
                     # Add user-complete reactions (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
                     if user_complete_reactions:
                         await self._add_reactions_parallel(
-                            user_complete_reactions,
-                            context.channel_id,
-                            context.message_ts
+                            user_complete_reactions, context.channel_id, context.message_ts
                         )
 
                     # Remove bot-processing reactions and add bot-complete reactions
@@ -742,15 +773,15 @@ class SlackBot:
                         # Remove bot-processing reactions if not persistent
                         for reaction in bot_processing_reactions:
                             if not reaction.get("persist", False):
-                                await self._reactions.remove(context.channel_id, result["ts"], reaction.get("emoji"))
+                                await self._reactions.remove(
+                                    context.channel_id, result["ts"], reaction.get("emoji")
+                                )
 
                         # Add bot-complete reactions to the bot's response (parallel)
                         bot_complete_reactions = self._get_reactions_for("bot", "complete")
                         if bot_complete_reactions:
-                            await self._add_reactions_parallel(
-                                bot_complete_reactions,
-                                context.channel_id,
-                                result["ts"]
+                            await self._reactions.add_parallel(
+                                bot_complete_reactions, context.channel_id, result["ts"]
                             )
 
                     success = True
@@ -761,7 +792,9 @@ class SlackBot:
                 if success:
                     for reaction in self.reactions:
                         if reaction.get("target") == "user" and not reaction.get("persist", False):
-                            await self._reactions.remove(context.channel_id, context.message_ts, reaction.get("emoji"))
+                            await self._reactions.remove(
+                                context.channel_id, context.message_ts, reaction.get("emoji")
+                            )
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")
@@ -803,11 +836,13 @@ class SlackBot:
                 # Handle negative feedback with comments enabled
                 if feedback_value == "negative" and self.enable_feedback_comments:
                     # Open modal for text input
-                    message_context = json.dumps({
-                        "channel_id": channel_id,
-                        "message_ts": message_ts,
-                        "run_id": run_id,
-                    })
+                    message_context = json.dumps(
+                        {
+                            "channel_id": channel_id,
+                            "message_ts": message_ts,
+                            "run_id": run_id,
+                        }
+                    )
                     modal_view = create_feedback_modal(message_context)
 
                     await client.views_open(
@@ -947,9 +982,7 @@ class SlackBot:
             try:
                 # Fetch thread history to check if bot has responded
                 thread_history = await self.slack_app.client.conversations_replies(
-                    channel=channel_id,
-                    ts=thread_ts,
-                    limit=100  # Check last 100 messages in thread
+                    channel=channel_id, ts=thread_ts, limit=100  # Check last 100 messages in thread
                 )
 
                 # Check if any message in the thread is from the bot
@@ -957,7 +990,9 @@ class SlackBot:
                     if message.get("user") == self._bot_user_id or message.get("bot_id"):
                         # Check if it's our bot specifically
                         if message.get("user") == self._bot_user_id:
-                            logger.debug(f"Bot has participated in thread {thread_ts} - processing without mention")
+                            logger.debug(
+                                f"Bot has participated in thread {thread_ts} - processing without mention"
+                            )
                             return True
             except Exception as e:
                 logger.warning(f"Could not check thread history: {e}")

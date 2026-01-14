@@ -1,4 +1,4 @@
-"""Unit tests for lg2slack.config module.
+"""Unit tests for langgraph2slack.config module.
 
 Tests configuration management including:
 - MessageContext properties and state
@@ -7,7 +7,7 @@ Tests configuration management including:
 
 import pytest
 from pydantic import ValidationError
-from lg2slack.config import MessageContext, BotConfig
+from langgraph2slack.config import MessageContext, BotConfig
 
 
 # ============================================================================

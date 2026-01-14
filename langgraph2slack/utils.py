@@ -4,7 +4,7 @@ Helper functions for message formatting, markdown conversion, and event detectio
 """
 
 import re
-from typing import List, Dict
+from typing import Dict, List
 
 
 def is_bot_mention(text: str, bot_user_id: str) -> bool:
@@ -133,6 +133,7 @@ def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
         [{'type': 'image', 'image_url': 'https://example.com/chart.png', 'alt_text': 'Sales Chart'}]
     """
     import logging
+
     logger = logging.getLogger(__name__)
 
     # Pattern matches: ![alt text](url)
@@ -197,35 +198,34 @@ def create_feedback_block(
 
     # Add context block with thread_id if provided and enabled
     if thread_id and show_thread_id:
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"_Thread ID: `{thread_id}`_"
-                }
-            ]
-        })
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"_Thread ID: `{thread_id}`_"}],
+            }
+        )
 
     # Add feedback buttons if enabled
     if show_feedback_buttons:
-        blocks.append({
-            "type": "context_actions",
-            "elements": [
-                {
-                    "type": "feedback_buttons",
-                    "action_id": "feedback",  # Used to identify button clicks
-                    "positive_button": {
-                        "text": {"type": "plain_text", "text": "Good Response"},
-                        "value": "positive",
-                    },
-                    "negative_button": {
-                        "text": {"type": "plain_text", "text": "Bad Response"},
-                        "value": "negative",
-                    },
-                }
-            ],
-        })
+        blocks.append(
+            {
+                "type": "context_actions",
+                "elements": [
+                    {
+                        "type": "feedback_buttons",
+                        "action_id": "feedback",  # Used to identify button clicks
+                        "positive_button": {
+                            "text": {"type": "plain_text", "text": "Good Response"},
+                            "value": "positive",
+                        },
+                        "negative_button": {
+                            "text": {"type": "plain_text", "text": "Bad Response"},
+                            "value": "negative",
+                        },
+                    }
+                ],
+            }
+        )
 
     return blocks
 
@@ -263,11 +263,11 @@ def create_feedback_modal(message_context: str) -> Dict:
                     "multiline": True,
                     "placeholder": {
                         "type": "plain_text",
-                        "text": "Optional: Tell us how we can improve..."
-                    }
-                }
+                        "text": "Optional: Tell us how we can improve...",
+                    },
+                },
             }
-        ]
+        ],
     }
 
 

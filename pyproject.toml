@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lg2slack"
+name = "langgraph2slack"
 version = "0.2.0"
 description = "Simple package to connect LangGraph applications to Slack"
 readme = "README.md"
@@ -46,14 +46,14 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/syasini/lg2slack"
-Documentation = "https://github.com/syasini/lg2slack#readme"
-Repository = "https://github.com/syasini/lg2slack"
-Issues = "https://github.com/syasini/lg2slack/issues"
+Homepage = "https://github.com/syasini/langgraph2slack"
+Documentation = "https://github.com/syasini/langgraph2slack#readme"
+Repository = "https://github.com/syasini/langgraph2slack"
+Issues = "https://github.com/syasini/langgraph2slack/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["lg2slack*"]
+include = ["langgraph2slack*"]
 
 [tool.black]
 line-length = 100

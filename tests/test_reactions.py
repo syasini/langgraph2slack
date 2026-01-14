@@ -8,7 +8,7 @@ Tests the new reaction configuration system that allows reactions on:
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from lg2slack.bot import SlackBot
+from langgraph2slack.bot import SlackBot
 
 
 # ============================================================================

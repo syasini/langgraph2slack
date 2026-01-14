@@ -1,4 +1,4 @@
-"""Unit tests for lg2slack.handlers.base module.
+"""Unit tests for langgraph2slack.handlers.base module.
 
 Tests BaseHandler functionality including:
 - Thread ID generation (deterministic UUID5)
@@ -7,9 +7,9 @@ Tests BaseHandler functionality including:
 """
 
 import pytest
-from lg2slack.handlers.base import BaseHandler
-from lg2slack.transformers import TransformerChain
-from lg2slack.config import MessageContext
+from langgraph2slack.handlers.base import BaseHandler
+from langgraph2slack.transformers import TransformerChain
+from langgraph2slack.config import MessageContext
 
 
 # ============================================================================

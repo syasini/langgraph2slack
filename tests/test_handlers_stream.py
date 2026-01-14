@@ -14,9 +14,9 @@ This is the most complex handler with:
 import pytest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
-from lg2slack.handlers.stream import StreamingHandler
-from lg2slack.transformers import TransformerChain
-from lg2slack.config import MessageContext
+from langgraph2slack.handlers.stream import StreamingHandler
+from langgraph2slack.transformers import TransformerChain
+from langgraph2slack.config import MessageContext
 
 
 # ============================================================================

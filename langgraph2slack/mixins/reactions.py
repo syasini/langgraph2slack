@@ -103,9 +103,8 @@ class ReactionMixin:
         try:
             # Add all reactions concurrently
             await asyncio.gather(
-                *[self.add(channel_id, message_ts, r.get("emoji"))
-                  for r in reactions],
-                return_exceptions=True  # Don't fail entire batch if one fails
+                *[self.add(channel_id, message_ts, r.get("emoji")) for r in reactions],
+                return_exceptions=True,  # Don't fail entire batch if one fails
             )
         except Exception as e:
             logger.error(f"Parallel reactions failed: {e}", exc_info=True)

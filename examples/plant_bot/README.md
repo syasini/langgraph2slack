@@ -2,7 +2,7 @@
 
 <img src="./media/logo.png" alt="logo" width="200">
 
-A 🌱 houseplant recommendation bot with 🖼️ 🔍 image search capabilities that demonstrates Langgraph and Slack integration using lg2slack.
+A 🌱 houseplant recommendation bot with 🖼️ 🔍 image search capabilities that demonstrates Langgraph and Slack integration using langgraph2slack.
 
 ## Quick Start
 
@@ -102,5 +102,5 @@ All responses stream token-by-token for low latency.
 
 ## Learn More
 
-- [lg2slack Documentation](../../README.md)
+- [langgraph2slack Documentation](../../README.md)
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
