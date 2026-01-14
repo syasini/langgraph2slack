@@ -362,6 +362,92 @@ class SlackBot:
 
         return config
 
+    def _convert_legacy_reaction(self, processing_reaction: str) -> dict:
+        """Convert legacy processing_reaction parameter to new reaction format.
+
+        Args:
+            processing_reaction: Legacy emoji string
+
+        Returns:
+            Normalized reaction config dict
+        """
+        return {
+            "emoji": processing_reaction,
+            "target": "user",
+            "when": "processing",
+            "persist": False,
+        }
+
+    def _validate_reaction_fields(self, reaction: dict, index: int) -> tuple[str, str, str]:
+        """Validate required fields in a reaction config.
+
+        Args:
+            reaction: Reaction config dict to validate
+            index: Index in the reactions list (for error messages)
+
+        Returns:
+            Tuple of (emoji, target, when) values
+
+        Raises:
+            ValueError: If required field is missing or invalid type
+        """
+        if not isinstance(reaction, dict):
+            raise ValueError(f"Reaction config at index {index} must be a dict, got {type(reaction)}")
+
+        emoji = reaction.get("emoji")
+        target = reaction.get("target")
+        when = reaction.get("when")
+
+        if not emoji:
+            raise ValueError(f"Reaction config at index {index} missing required field 'emoji'")
+        if not target:
+            raise ValueError(f"Reaction config at index {index} missing required field 'target'")
+        if not when:
+            raise ValueError(f"Reaction config at index {index} missing required field 'when'")
+
+        return emoji, target, when
+
+    def _normalize_single_reaction(self, reaction: dict, index: int) -> dict:
+        """Normalize and validate a single reaction configuration.
+
+        Args:
+            reaction: Reaction config dict
+            index: Index in the reactions list (for error messages)
+
+        Returns:
+            Normalized reaction config dict
+
+        Raises:
+            ValueError: If config is invalid
+        """
+        # Validate required fields
+        emoji, target, when = self._validate_reaction_fields(reaction, index)
+
+        # Validate field values
+        if target not in ["user", "bot"]:
+            raise ValueError(
+                f"Reaction config at index {index} has invalid target='{target}'. "
+                f"Must be 'user' or 'bot'."
+            )
+        if when not in ["processing", "complete"]:
+            raise ValueError(
+                f"Reaction config at index {index} has invalid when='{when}'. "
+                f"Must be 'processing' or 'complete'."
+            )
+
+        # Set default persist based on when:
+        # - processing: False (auto-remove when done)
+        # - complete: True (keep the reaction)
+        default_persist = when == "complete"
+
+        # Return normalized config with when-dependent persist default
+        return {
+            "emoji": emoji,
+            "target": target,
+            "when": when,
+            "persist": reaction.get("persist", default_persist),
+        }
+
     def _normalize_reactions(
         self,
         processing_reaction: Optional[str],
@@ -370,6 +456,7 @@ class SlackBot:
         """Normalize and validate reaction configurations.
 
         Handles backward compatibility with processing_reaction parameter.
+        Delegates to helper methods for single-responsibility validation.
 
         Args:
             processing_reaction: Legacy single emoji for user message during processing
@@ -381,9 +468,6 @@ class SlackBot:
         Raises:
             ValueError: If reaction config is invalid
         """
-        # Start with empty list
-        normalized = []
-
         # Handle backward compatibility: processing_reaction -> reactions
         if processing_reaction is not None:
             if reactions is not None:
@@ -393,73 +477,17 @@ class SlackBot:
                 )
             else:
                 # Convert legacy format to new format
-                normalized.append(
-                    {
-                        "emoji": processing_reaction,
-                        "target": "user",
-                        "when": "processing",
-                        "persist": False,
-                    }
-                )
+                legacy_reaction = self._convert_legacy_reaction(processing_reaction)
                 logger.info(
                     f"Converted processing_reaction='{processing_reaction}' to new reactions format"
                 )
-                return normalized
+                return [legacy_reaction]
 
         # Use new reactions format if provided
         if reactions:
-            for idx, reaction in enumerate(reactions):
-                # Validate required fields
-                if not isinstance(reaction, dict):
-                    raise ValueError(
-                        f"Reaction config at index {idx} must be a dict, got {type(reaction)}"
-                    )
+            return [self._normalize_single_reaction(r, idx) for idx, r in enumerate(reactions)]
 
-                emoji = reaction.get("emoji")
-                target = reaction.get("target")
-                when = reaction.get("when")
-
-                if not emoji:
-                    raise ValueError(
-                        f"Reaction config at index {idx} missing required field 'emoji'"
-                    )
-                if not target:
-                    raise ValueError(
-                        f"Reaction config at index {idx} missing required field 'target'"
-                    )
-                if not when:
-                    raise ValueError(
-                        f"Reaction config at index {idx} missing required field 'when'"
-                    )
-
-                # Validate values
-                if target not in ["user", "bot"]:
-                    raise ValueError(
-                        f"Reaction config at index {idx} has invalid target='{target}'. "
-                        f"Must be 'user' or 'bot'."
-                    )
-                if when not in ["processing", "complete"]:
-                    raise ValueError(
-                        f"Reaction config at index {idx} has invalid when='{when}'. "
-                        f"Must be 'processing' or 'complete'."
-                    )
-
-                # Set default persist based on when:
-                # - processing: False (auto-remove when done)
-                # - complete: True (keep the reaction)
-                default_persist = when == "complete"
-
-                # Add normalized config with when-dependent persist default
-                normalized.append(
-                    {
-                        "emoji": emoji,
-                        "target": target,
-                        "when": when,
-                        "persist": reaction.get("persist", default_persist),
-                    }
-                )
-
-        return normalized
+        return []
 
     def _get_reactions_for(self, target: str, when: str) -> list[dict]:
         """Get reactions matching target and when criteria.
