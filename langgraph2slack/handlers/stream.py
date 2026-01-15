@@ -241,7 +241,7 @@ class StreamingHandler(BaseHandler):
         self,
         buffer: list[str],
         last_flush_time: float,
-    ) -> bool:
+    ) -> tuple[bool, Optional[str]]:
         """Determine if buffer should be flushed to Slack.
 
         Flushes when EITHER condition is met:
@@ -256,19 +256,23 @@ class StreamingHandler(BaseHandler):
             last_flush_time: Timestamp of last flush
 
         Returns:
-            True if buffer should be flushed
+            Tuple of (should_flush, reason):
+                - should_flush: True if buffer should be flushed
+                - reason: Human-readable reason for flushing (for logging), or None if no flush
         """
         if not buffer:
-            return False
+            return False, None
 
         # Calculate time elapsed
         time_since_flush = time.time() - last_flush_time
 
         # Check flush conditions (time OR chunk count)
-        return (
-            time_since_flush >= self.stream_buffer_time
-            or len(buffer) >= self.stream_buffer_max_chunks
-        )
+        if time_since_flush >= self.stream_buffer_time:
+            return True, f"time limit ({time_since_flush:.2f}s elapsed)"
+        elif len(buffer) >= self.stream_buffer_max_chunks:
+            return True, f"chunk limit ({len(buffer)} chunks)"
+
+        return False, None
 
     async def _flush_buffer(
         self,
@@ -299,67 +303,27 @@ class StreamingHandler(BaseHandler):
         # Clear buffer
         buffer.clear()
 
-    def _should_flush_buffer(
-        self,
-        buffer: list[str],
-        last_flush_time: float,
-    ) -> bool:
-        """Determine if buffer should be flushed to Slack.
-
-        Flushes when EITHER condition is met:
-        1. Enough time has elapsed since last flush (stream_buffer_time)
-        2. Buffer has accumulated too many chunks (stream_buffer_max_chunks)
-
-        These work together as safety limits - whichever is reached first triggers the flush.
-        Typical behavior: time limit triggers for normal streaming, chunk limit catches edge cases.
-
-        Args:
-            buffer: List of content chunks accumulated
-            last_flush_time: Timestamp of last flush
-
-        Returns:
-            True if buffer should be flushed
-        """
-        if not buffer:
-            return False
-
-        # Calculate time elapsed
-        time_since_flush = time.time() - last_flush_time
-
-        # Check flush conditions (time OR chunk count)
-        return (
-            time_since_flush >= self.stream_buffer_time
-            or len(buffer) >= self.stream_buffer_max_chunks
-        )
-
-    async def _flush_buffer(
+    async def _flush_buffer_and_return_time(
         self,
         buffer: list[str],
         channel_id: str,
         stream_ts: str,
-    ) -> None:
-        """Flush accumulated buffer to Slack stream.
+    ) -> float:
+        """Flush buffer and return current time.
+
+        This helper ensures that the flush time is always updated correctly,
+        making it impossible to forget updating last_flush_time after a flush.
 
         Args:
             buffer: List of content chunks to flush
             channel_id: Slack channel ID
             stream_ts: Stream timestamp
+
+        Returns:
+            Current timestamp after flush
         """
-        if not buffer:
-            return
-
-        # Combine all buffered chunks
-        combined_content = "".join(buffer)
-
-        # Send to Slack
-        await self._append_to_slack_stream(
-            channel_id=channel_id,
-            stream_ts=stream_ts,
-            content=combined_content,
-        )
-
-        # Clear buffer
-        buffer.clear()
+        await self._flush_buffer(buffer, channel_id, stream_ts)
+        return time.time()
 
     async def _stream_from_langgraph_to_slack(
         self,
@@ -473,10 +437,12 @@ class StreamingHandler(BaseHandler):
                 buffer.append(content)
 
                 # Check if we should flush buffer
-                if self._should_flush_buffer(buffer, last_flush_time):
-                    logger.debug(f"Flushing buffer: {len(buffer)} chunks")
-                    await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
-                    last_flush_time = time.time()
+                should_flush, reason = self._should_flush_buffer(buffer, last_flush_time)
+                if should_flush:
+                    logger.debug(f"Flushing buffer: {len(buffer)} chunks (reason: {reason})")
+                    last_flush_time = await self._flush_buffer_and_return_time(
+                        buffer, slack_channel, slack_stream_ts
+                    )
 
             # Final flush for any remaining content
             if buffer:

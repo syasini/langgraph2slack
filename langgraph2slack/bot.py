@@ -128,6 +128,9 @@ class SlackBot:
             slack_signing_secret=slack_signing_secret,
         )
 
+        # Validate buffer configuration (raises ValueError if invalid)
+        self._validate_buffer_config(stream_buffer_time, stream_buffer_max_chunks)
+
         # Store settings
         self.streaming_enabled = streaming
         self.reply_in_thread = reply_in_thread
@@ -361,6 +364,47 @@ class SlackBot:
             config.SLACK_SIGNING_SECRET = SecretStr(slack_signing_secret)
 
         return config
+
+    def _validate_buffer_config(
+        self,
+        stream_buffer_time: float,
+        stream_buffer_max_chunks: int,
+    ) -> None:
+        """Validate buffer configuration parameters.
+
+        Prevents common configuration mistakes by enforcing sensible bounds on buffering parameters.
+        This catches issues like negative values or extreme settings that would degrade user experience.
+
+        Args:
+            stream_buffer_time: Time in seconds to buffer chunks (must be > 0, warn if > 5.0)
+            stream_buffer_max_chunks: Maximum chunks to buffer (must be >= 1, warn if > 100)
+
+        Raises:
+            ValueError: If parameters are invalid (negative, zero, or nonsensical values)
+        """
+        # Validate stream_buffer_time
+        if stream_buffer_time <= 0:
+            raise ValueError(
+                f"stream_buffer_time must be positive, got {stream_buffer_time}"
+            )
+        if stream_buffer_time > 5.0:
+            logger.warning(
+                f"stream_buffer_time={stream_buffer_time}s is very high. "
+                "This may cause noticeable lag in streaming responses. "
+                "Recommended range: 0.05-0.2 seconds."
+            )
+
+        # Validate stream_buffer_max_chunks
+        if stream_buffer_max_chunks < 1:
+            raise ValueError(
+                f"stream_buffer_max_chunks must be >= 1, got {stream_buffer_max_chunks}"
+            )
+        if stream_buffer_max_chunks > 100:
+            logger.warning(
+                f"stream_buffer_max_chunks={stream_buffer_max_chunks} is very high. "
+                "This may cause memory issues or delayed flushing. "
+                "Recommended range: 5-20 chunks."
+            )
 
     def _convert_legacy_reaction(self, processing_reaction: str) -> dict:
         """Convert legacy processing_reaction parameter to new reaction format.
