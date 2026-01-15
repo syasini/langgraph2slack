@@ -1,7 +1,9 @@
 {
   "dependencies": [
+    "langchain",
     "langchain-anthropic",
     "langchain-community",
+    "langchain-core",
     "langgraph",
     "langchain-tavily",
     "langgraph2slack"
