@@ -1,10 +1,10 @@
-"""Slack bot server using lg2slack.
+"""Slack bot server using langgraph2slack.
 
 Just a few lines of code to connect the LangGraph agent to Slack!
 """
 
 import re
-from lg2slack import SlackBot
+from langgraph2slack import SlackBot
 
 bot = SlackBot(
     streaming=True,
@@ -14,24 +14,38 @@ bot = SlackBot(
     extract_images=True,
     include_metadata=True,
     enable_feedback_comments= True,
-    processing_reaction="eyes",
+    reactions=[
+                    {"emoji": "white_check_mark", "target": "user", "when": "complete"},
+                    {"emoji": "hourglass", "target": "bot", "when": "processing", "persist": False},
+                    {"emoji": "eyes", "target": "user", "when": "processing", "persist":False}
+                ],
+    stream_buffer_time=0.1
     )
 
+
+# --- Input Transformation ---
+# You can modify the user's message before it's sent to the LangGraph agent
 @bot.transform_input
 async def talk_like_a_plant(message: str) -> str:
     """Transform user messages to sound like a plant."""
-    return f"[Plant Voice: talk like a plant from the 80s!] {message}"
+    return f"[answer in bullet points only!] {message}"
 
-@bot.transform_output
-async def remove_search_tags(message: str) -> str:
-    """Remove content between <search> XML tags."""
-    return re.sub(r'<search>.*?</search>', '', message, flags=re.DOTALL).strip()
 
+# --- Output Transformation ---
+# You can modify the agent's response before it's sent back to Slack
 
 @bot.transform_output
 async def add_greeting(message: str, context) -> str:
     """Add a greeting with the user's name."""
     return f"Hello <@{context.user_id}>!\n\n{message}"
+
+
+@bot.transform_output
+async def test_error_handler(message: str) -> str:
+    """Raise an error if message contains 'error' for testing error handling."""
+    if "error" in message.lower():
+        raise ValueError("This is a test error triggered by 'error' in your message!")
+    return message
 
 
 # Export the app for langgraph.json

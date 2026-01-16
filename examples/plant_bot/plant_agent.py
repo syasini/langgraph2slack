@@ -1,40 +1,25 @@
-"""Houseplant recommendation agent with conditional image search.
+"""Houseplant recommendation agent using LangChain's create_agent.
 
 Simple, fast agent that:
 1. Responds immediately with plant care knowledge
-2. Only searches for images when needed
-3. Uses MessagesState with thread_id for automatic conversation history
+2. Automatically searches for images when needed using tools
+3. Matches exact image count requested by user (1 image, a few, many, etc.)
+4. Uses MessagesState with thread_id for automatic conversation history
 
-This design ensures low latency for simple questions while providing
-images when the user asks about specific plants.
+This design uses LangChain's create_agent (ReAct pattern) for simplified
+implementation while maintaining low latency for simple questions.
 """
 
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_tavily import TavilySearch
-from langgraph.graph import StateGraph, MessagesState, END
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import SystemMessage, HumanMessage
-import re
+from langchain.agents import create_agent
+from langchain_core.tools import tool
 
 load_dotenv()
 
-# Define state - extends MessagesState for automatic message history
-class PlantAgentState(MessagesState):
-    """State with automatic message history tracking."""
-    needs_search: bool
-    search_query: str
-    search_results: str
-
 # Initialize LLM (Haiku 4.5 for speed)
 llm = ChatAnthropic(model="claude-haiku-4-5", temperature=0.7, streaming=True)
-
-# Initialize Tavily search
-tavily = TavilySearch(
-    max_results=3,
-    include_images=True,
-    search_depth="basic",
-)
 
 # System prompt
 SYSTEM_PROMPT = """You are a helpful houseplant expert assistant. CRITICAL: Keep responses SHORT and CONCISE.
@@ -48,120 +33,57 @@ BREVITY RULES (MUST FOLLOW):
 - Maximum 2-3 sentences per response
 - Use bullet points for lists (max 3-4 items)
 - NO long explanations or elaborations
-- NO unnecessary details or background information unless explicitely asked for
 - Get straight to the point
 
-If the user asks to see what a plant looks like, or asks about a specific plant they want to see:
-- Start your response with: <search> plant_name </search>
-- Then if you have enough context continue with a brief answer
-- Your initial response will be used to trigger a web search for images
+When users ask to see what a plant looks like, use the search_plant_images tool.
+
+IMAGE COUNT RULE (CRITICAL):
+- MATCH the exact number of images the user requests:
+  - "show me an image" / "one image" → max_results=1 (show EXACTLY 1 image)
+  - "show me a few" / "some images" → max_results=2 or 3
+  - "show me several" / "many images" → max_results=3+
+- If user doesn't specify count, default to 2-3 images
+- NEVER show more images than requested
 
 IMAGE URL RULE:
 - If you have search results with images, include them using markdown: ![plant name](IMAGE_URL)
-- Include up to 3 images per response 
+- Include EXACTLY the number of images from the search results (don't add extra)
 - DO NOT fabricate image URLs or use placeholder URLs
 
-CRITICAL - CONTINUATION RULE:
-If you see your own previous response in the conversation history, you are CONTINUING that response.
-DO NOT repeat what you already said. Simply add the new information (like images) to continue naturally.
-Think of it as picking up where you left off, not starting over.
-
 REMEMBER: Brief, direct answers only. Quality over quantity.
-
 """
- 
-def respond_node(state: PlantAgentState) -> dict:
-    """Generate response, determine if search is needed."""
-    search_results = state.get("search_results", "")
 
-    # Build messages with system prompt
-    messages = [SystemMessage(content=SYSTEM_PROMPT)]
 
-    # Add message history (automatically tracked by MessagesState)
-    messages.extend(state["messages"])
+@tool
+def search_plant_images(query: str, max_results: int = 3) -> str:
+    """Search for plant images and information.
 
-    # Add search results if available
-    if search_results:
-        messages.append(HumanMessage(content=f"""<search_results>
-{search_results}
-</search_results>
+    Use this tool when users ask to see what a plant looks like
+    or want images of specific plants.
 
-You already started responding above. Now CONTINUE your response by incorporating these search results.
-Add the plant images using markdown ![plant name](url) format. Do NOT repeat what you already said.
+    Args:
+        query: The plant name or search query
+        max_results: Number of image results to return (default: 3)
+                    - Use 1 if user says "an image" or "one image"
+                    - Use 2-3 if user says "a few" or "some"
+                    - Use 3+ if user says "several" or "many"
 
-Image URLs are included under the "images" field in the search results. Copy the relevant ones exactly as provided.
+    Returns:
+        Search results containing plant images and information
+    """
+    tavily = TavilySearch(
+        max_results=max_results,
+        include_images=True,
+        search_depth="basic",
+    )
+    results = tavily.invoke(f"{query} images")
+    return str(results)
 
-"""))
 
-    # Generate response
-    response = llm.invoke(messages)
-
-    # Check if we need to search by looking for <search> tags
-    needs_search = False
-    search_query = ""
-
-    # Extract search query from response if <search> tags are present
-    match = re.search(r"<search>(.*?)</search>", response.content)
-    if match:
-        needs_search = True
-        search_query = match.group(1).strip()
-        # Remove the <search> tags and query from response
-        response.content = re.sub(r"<search>.*?</search>", "", response.content).strip()
-
-    return {
-        "messages": [response],
-        "needs_search": needs_search,
-        "search_query": search_query,
-    }
-
-def search_node(state: PlantAgentState) -> dict:
-    """Search for plant images and information."""
-    search_query = state.get("search_query", "")
-
-    if not search_query:
-        return {"search_results": ""}
-
-    # Search for the plant
-    full_query = f"{search_query} images"
-    results = tavily.invoke(full_query)
-
-    return {
-        "search_results": str(results),
-        "needs_search": False,  # Reset for next iteration
-    }
-
-def should_search(state: PlantAgentState) -> str:
-    """Conditional edge: decide if we need to search."""
-    if state.get("needs_search", False):
-        return "search"
-    return "end"
-
-# Build the graph
-workflow = StateGraph(PlantAgentState)
-
-# Add nodes
-workflow.add_node("respond", respond_node)
-workflow.add_node("search", search_node)
-
-# Set entry point
-workflow.set_entry_point("respond")
-
-# Add conditional edge from respond
-workflow.add_conditional_edges(
-    "respond",
-    should_search,
-    {
-        "search": "search",
-        "end": END,
-    }
+# Build the graph using create_agent
+# Note: checkpointer is NOT provided - LangGraph Platform handles persistence automatically
+graph = create_agent(
+    model=llm,
+    tools=[search_plant_images],
+    system_prompt=SYSTEM_PROMPT,
 )
-
-# Search loops back to respond
-workflow.add_edge("search", "respond")
-
-# Compile graph - for LangGraph Platform (persistence handled automatically)
-graph = workflow.compile()
-
-# Also export a version with checkpointer for local testing (Streamlit)
-checkpointer = MemorySaver()
-graph_with_checkpointer = workflow.compile(checkpointer=checkpointer)
