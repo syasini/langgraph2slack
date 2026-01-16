@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- New `reactions` mixin for automated emoji feedback (processing, success, etc.)
+- Inline comments to `examples/plant_bot/slack_server.py` for better readability
+- Documentation and roadmap in `todo/` directory
+
+### Changed
+- **BREAKING**: Renamed package from `lg2slack` to `langgraph2slack`
+- Updated `plant_bot` example to use simplified `create_agent` pattern
+- Improved core `SlackBot` with better streaming and metadata handling
+
+## [0.2.0] - 2024-11-15
+### Added
+- Massive expansion of test suite (3000+ lines of tests)
+- Improved streaming handler with better chunk processing
+- Enhanced `bot.py` with more robust message processing logic
 
 ## [0.1.5] - 2025-11-01
 ### Added
