@@ -20,7 +20,14 @@ from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
 from .transformers import TransformerChain
-from .utils import create_feedback_modal, extract_feedback_text, is_bot_mention, is_dm
+from .utils import (
+    TOOL_CALL_DETAILS_ACTION_ID,
+    create_feedback_modal,
+    create_plan_block,
+    extract_feedback_text,
+    is_bot_mention,
+    is_dm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +68,8 @@ class SlackBot:
         message_types: Optional[list[str]] = None,
         stream_buffer_time: float = 0.1,
         stream_buffer_max_chunks: int = 10,
+        show_tool_calls: bool = False,
+        show_tool_call_details: bool = True,
     ):
         """Initialize SlackBot.
 
@@ -117,6 +126,14 @@ class SlackBot:
                 Recommended range: 5-20 chunks.
                 Example: 5 = flush after 5 chunks (more API calls, handles tiny chunks)
                          20 = flush after 20 chunks (fewer API calls, batches more aggressively)
+            show_tool_calls: Show a live plan block with tool call status as they execute (default: False).
+                Uses Slack's task_card/plan blocks to display each tool call with in_progress →
+                complete status. The plan block is posted as a separate message before the text
+                response and updated in real-time during streaming.
+            show_tool_call_details: When show_tool_calls=True, include truncated input/output previews
+                in each task card and add a "View Full Details" button (default: True).
+                Clicking the button opens a modal with full untruncated content (SQL, JSON, etc.).
+                Set to False to show only tool name + status.
         """
         logger.info("Initializing SlackBot...")
 
@@ -141,6 +158,13 @@ class SlackBot:
         self.max_image_blocks = max_image_blocks
         self.include_metadata = include_metadata
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
+        self.show_tool_calls = show_tool_calls
+        self.show_tool_call_details = show_tool_call_details
+
+        # Shared store for tool call data used by the "View Full Details" modal.
+        # Maps plan_ts (Slack message timestamp) -> list[ActiveToolCall].
+        # Passed by reference to both handlers so they can write to it.
+        self.tool_call_store: Dict[str, list] = {}
 
         # Normalize reaction configs (handle backward compatibility)
         self.reactions = self._normalize_reactions(processing_reaction, reactions)
@@ -188,6 +212,9 @@ class SlackBot:
                 message_types=self.message_types,
                 stream_buffer_time=stream_buffer_time,
                 stream_buffer_max_chunks=stream_buffer_max_chunks,
+                show_tool_calls=self.show_tool_calls,
+                show_tool_call_details=self.show_tool_call_details,
+                tool_call_store=self.tool_call_store,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:
@@ -201,6 +228,11 @@ class SlackBot:
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
+                slack_client=self.slack_app,
+                reply_in_thread=self.reply_in_thread,
+                show_tool_calls=self.show_tool_calls,
+                show_tool_call_details=self.show_tool_call_details,
+                tool_call_store=self.tool_call_store,
             )
             logger.info("Using MessageHandler (non-streaming)")
 
@@ -962,6 +994,107 @@ class SlackBot:
 
             except Exception as e:
                 logger.exception(f"Error handling feedback modal submission: {e}")
+
+        # Handler for "View Full Details" button on plan block messages
+        @self.slack_app.action(TOOL_CALL_DETAILS_ACTION_ID)
+        async def handle_tool_call_details(ack, body, client, logger):
+            """Open a modal with full untruncated tool call inputs and outputs.
+
+            The plan_ts stored in the button value is used to look up the tool call
+            data from self.tool_call_store, which is populated by the handlers during
+            streaming or after non-streaming completion.
+            """
+            await ack()
+
+            try:
+                action = body.get("actions", [{}])[0]
+                plan_ts = action.get("value", "")
+
+                tool_calls = self.tool_call_store.get(plan_ts, [])
+                if not tool_calls:
+                    logger.warning(f"No tool call data found for plan_ts={plan_ts}")
+                    await client.views_open(
+                        trigger_id=body["trigger_id"],
+                        view={
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "Tool Call Details"},
+                            "close": {"type": "plain_text", "text": "Close"},
+                            "blocks": [
+                                {
+                                    "type": "section",
+                                    "text": {
+                                        "type": "mrkdwn",
+                                        "text": "_Details are no longer available._",
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                    return
+
+                # Build modal blocks: one section per tool call
+                modal_blocks = []
+                for tc in tool_calls:
+                    # Tool name as header
+                    modal_blocks.append(
+                        {
+                            "type": "header",
+                            "text": {"type": "plain_text", "text": tc.name},
+                        }
+                    )
+                    # Status line
+                    status_emoji = {"complete": ":white_check_mark:", "error": ":x:"}.get(
+                        tc.status, ":hourglass_flowing_sand:"
+                    )
+                    modal_blocks.append(
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"{status_emoji} *Status:* {tc.status}",
+                            },
+                        }
+                    )
+                    # Full input (if any)
+                    args = tc.args_json()
+                    if args.strip():
+                        modal_blocks.append(
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Input:*\n```{args}```",
+                                },
+                                "expand": True,
+                            }
+                        )
+                    # Full output (if any)
+                    if tc.result:
+                        modal_blocks.append(
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Output:*\n```{tc.result}```",
+                                },
+                                "expand": True,
+                            }
+                        )
+                    # Divider between tool calls
+                    modal_blocks.append({"type": "divider"})
+
+                await client.views_open(
+                    trigger_id=body["trigger_id"],
+                    view={
+                        "type": "modal",
+                        "title": {"type": "plain_text", "text": "Tool Call Details"},
+                        "close": {"type": "plain_text", "text": "Close"},
+                        "blocks": modal_blocks,
+                    },
+                )
+
+            except Exception as e:
+                logger.exception(f"Error opening tool call details modal: {e}")
 
         logger.info("Slack event handlers registered")
 

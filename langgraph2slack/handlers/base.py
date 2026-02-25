@@ -6,7 +6,7 @@ to reduce code duplication and ensure consistency.
 
 import logging
 import uuid
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..config import MessageContext
 from ..transformers import TransformerChain
@@ -31,6 +31,9 @@ class BaseHandler:
         show_thread_id: bool = True,
         extract_images: bool = True,
         max_image_blocks: int = 5,
+        show_tool_calls: bool = False,
+        show_tool_call_details: bool = True,
+        tool_call_store: Optional[Dict] = None,
     ):
         """Initialize base handler.
 
@@ -42,6 +45,10 @@ class BaseHandler:
             show_thread_id: Whether to show thread_id in footer (default: True)
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
+            show_tool_calls: Show plan block with tool call status (default: False)
+            show_tool_call_details: Show truncated input/output preview + View Details button (default: True)
+            tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall] for the
+                             "View Full Details" modal. Passed by reference from SlackBot.
         """
         self.assistant_id = assistant_id
         self.input_transformers = input_transformers
@@ -50,6 +57,10 @@ class BaseHandler:
         self.show_thread_id = show_thread_id
         self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
+        self.show_tool_calls = show_tool_calls
+        self.show_tool_call_details = show_tool_call_details
+        # Shared store: plan_ts -> list[ActiveToolCall]; same dict reference across bot + handlers
+        self.tool_call_store: Dict = tool_call_store if tool_call_store is not None else {}
 
     async def _apply_input_transforms(
         self,

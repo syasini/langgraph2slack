@@ -12,7 +12,8 @@ from typing import Optional
 
 from ..config import MessageContext
 from ..transformers import TransformerChain
-from ..utils import clean_markdown
+from ..tool_calls import ToolCallTracker
+from ..utils import clean_markdown, create_plan_block, create_tool_details_button
 from ..mixins import ReactionMixin
 from .base import BaseHandler
 
@@ -50,6 +51,9 @@ class StreamingHandler(BaseHandler):
         message_types: list[str] = None,
         stream_buffer_time: float = 0.1,
         stream_buffer_max_chunks: int = 10,
+        show_tool_calls: bool = False,
+        show_tool_call_details: bool = True,
+        tool_call_store: Optional[dict] = None,
     ):
         """Initialize streaming handler.
 
@@ -70,6 +74,9 @@ class StreamingHandler(BaseHandler):
                 Buffer flushes when EITHER this time elapses OR stream_buffer_max_chunks is reached.
             stream_buffer_max_chunks: Maximum chunks to buffer before force-flushing (default: 10).
                 Buffer flushes when EITHER stream_buffer_time elapses OR this limit is reached.
+            show_tool_calls: Show live plan block with tool call status (default: False)
+            show_tool_call_details: Show truncated input/output + View Details button (default: True)
+            tool_call_store: Shared dict (from SlackBot) mapping plan_ts -> list[ActiveToolCall]
         """
         # Initialize base class
         super().__init__(
@@ -80,6 +87,9 @@ class StreamingHandler(BaseHandler):
             show_thread_id=show_thread_id,
             extract_images=extract_images,
             max_image_blocks=max_image_blocks,
+            show_tool_calls=show_tool_calls,
+            show_tool_call_details=show_tool_call_details,
+            tool_call_store=tool_call_store,
         )
         # Store handler-specific attributes
         self.langgraph_client = langgraph_client
@@ -206,6 +216,7 @@ class StreamingHandler(BaseHandler):
                 slack_channel=context.channel_id,
                 slack_stream_ts=stream_ts,
                 context=context,
+                slack_thread_ts=slack_thread_ts,
             )
 
             # Step 7: Stop stream with optional image blocks
@@ -325,6 +336,107 @@ class StreamingHandler(BaseHandler):
         await self._flush_buffer(buffer, channel_id, stream_ts)
         return time.time()
 
+    async def _post_plan_block(
+        self,
+        channel_id: str,
+        thread_ts: Optional[str],
+        tracker: "ToolCallTracker",
+        run_id: Optional[str],
+    ) -> Optional[str]:
+        """Post an initial plan block message showing tool call status.
+
+        Args:
+            channel_id: Slack channel ID
+            thread_ts: Slack thread timestamp (plan block goes in the same thread as the response)
+            tracker: ToolCallTracker with current tool call state
+            run_id: Optional LangGraph run ID for LangSmith source links
+
+        Returns:
+            Slack message timestamp (plan_ts) or None if posting failed
+        """
+        try:
+            calls = tracker.get_calls()
+            plan_block = create_plan_block(
+                calls, self.show_tool_call_details, run_id, "Working on it..."
+            )
+            response = await self.slack_client.client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text="Working on it...",
+                blocks=[plan_block],
+            )
+            plan_ts = response.get("ts")
+            if plan_ts:
+                self.tool_call_store[plan_ts] = calls
+            return plan_ts
+        except Exception as e:
+            logger.error(f"Failed to post plan block: {e}", exc_info=True)
+            return None
+
+    async def _update_plan_block(
+        self,
+        channel_id: str,
+        plan_ts: str,
+        tracker: "ToolCallTracker",
+        run_id: Optional[str],
+    ) -> None:
+        """Update the plan block message with current tool call status.
+
+        Args:
+            channel_id: Slack channel ID
+            plan_ts: Slack message timestamp of the existing plan block
+            tracker: ToolCallTracker with current tool call state
+            run_id: Optional LangGraph run ID for LangSmith source links
+        """
+        try:
+            calls = tracker.get_calls()
+            plan_block = create_plan_block(
+                calls, self.show_tool_call_details, run_id, "Working on it..."
+            )
+            await self.slack_client.client.chat_update(
+                channel=channel_id,
+                ts=plan_ts,
+                text="Working on it...",
+                blocks=[plan_block],
+            )
+            self.tool_call_store[plan_ts] = calls
+        except Exception as e:
+            logger.warning(f"Failed to update plan block: {e}")
+
+    async def _finalize_plan_block(
+        self,
+        channel_id: str,
+        plan_ts: str,
+        tracker: "ToolCallTracker",
+        run_id: Optional[str],
+    ) -> None:
+        """Do final plan block update: change title to 'Done' and add View Details button.
+
+        Called after all streaming is complete. Adds the 'View Full Details' button
+        that lets users open a modal with untruncated tool call inputs and outputs.
+
+        Args:
+            channel_id: Slack channel ID
+            plan_ts: Slack message timestamp of the existing plan block
+            tracker: ToolCallTracker with final tool call state
+            run_id: Optional LangGraph run ID for LangSmith source links
+        """
+        try:
+            calls = tracker.get_calls()
+            plan_block = create_plan_block(calls, self.show_tool_call_details, run_id, "Done")
+            blocks = [plan_block]
+            if self.show_tool_call_details:
+                blocks.append(create_tool_details_button(plan_ts))
+            await self.slack_client.client.chat_update(
+                channel=channel_id,
+                ts=plan_ts,
+                text="Done",
+                blocks=blocks,
+            )
+            self.tool_call_store[plan_ts] = calls
+        except Exception as e:
+            logger.warning(f"Failed to finalize plan block: {e}")
+
     async def _stream_from_langgraph_to_slack(
         self,
         message: str,
@@ -332,6 +444,7 @@ class StreamingHandler(BaseHandler):
         slack_channel: str,
         slack_stream_ts: str,
         context: MessageContext,
+        slack_thread_ts: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         """Stream from LangGraph to Slack with buffered forwarding.
 
@@ -353,6 +466,14 @@ class StreamingHandler(BaseHandler):
         complete_response = ""
         chunk_count = 0
         run_id = None
+
+        # Tool call tracking (only active when show_tool_calls=True)
+        tracker = ToolCallTracker() if self.show_tool_calls else None
+        plan_ts: Optional[str] = None
+        if self.show_tool_calls:
+            logger.info(
+                f"Tool call tracking enabled (thread_ts={slack_thread_ts}, details={self.show_tool_call_details})"
+            )
 
         # Initialize buffer for time-based flushing
         buffer = []
@@ -396,6 +517,120 @@ class StreamingHandler(BaseHandler):
                 message_data, _msg_metadata = chunk.data
                 msg_type = message_data.get("type", "")
                 logger.debug(f"Chunk #{chunk_count}: message type={msg_type}")
+                if tracker is not None and msg_type not in ("AIMessageChunk",):
+                    logger.warning(
+                        f"[show_tool_calls] Non-streaming msg type: {msg_type!r} "
+                        f"keys={list(message_data.keys())} "
+                        f"tool_calls={bool(message_data.get('tool_calls'))} "
+                        f"tool_call_id={message_data.get('tool_call_id')!r}"
+                    )
+
+                # Tool call detection (runs before message type filter so tool messages are handled
+                # even when "tool" is not in self.message_types).
+                # Handles two cases:
+                # 1. Streaming: AIMessageChunk with tool_call_chunks (incremental JSON fragments)
+                # 2. Complete: "ai"/"AIMessage" with tool_calls dict (ReAct agent pattern)
+                if tracker is not None:
+                    if msg_type == "AIMessageChunk":
+                        tc_chunks = message_data.get("tool_call_chunks", [])
+                        if tc_chunks:
+                            logger.info(
+                                f"Tool call chunks detected: {[tc.get('name') or tc.get('id') or '...' for tc in tc_chunks]}"
+                            )
+                            had_new_call = False
+                            for tc_chunk in tc_chunks:
+                                if tracker.handle_chunk(tc_chunk):
+                                    had_new_call = True
+                            if had_new_call and tracker.has_calls():
+                                if plan_ts is None:
+                                    plan_ts = await self._post_plan_block(
+                                        slack_channel, slack_thread_ts, tracker, run_id
+                                    )
+                                else:
+                                    await self._update_plan_block(
+                                        slack_channel, plan_ts, tracker, run_id
+                                    )
+
+                    elif msg_type in ("ai", "AIMessage"):
+                        # Complete AIMessage from ReAct agent node - tool call decision arrived
+                        # as a full message (not streaming chunks). This is the typical pattern
+                        # with create_react_agent / create_agent.
+                        import json as _json
+                        tool_calls = message_data.get("tool_calls", [])
+                        if tool_calls:
+                            logger.info(
+                                f"Tool calls detected in AIMessage: {[tc.get('name') for tc in tool_calls]}"
+                            )
+                            had_new_call = False
+                            for idx, tc in enumerate(tool_calls):
+                                call_id = tc.get("id") or f"call_{idx}"
+                                name = tc.get("name", "unknown_tool")
+                                args = tc.get("args", {})
+                                args_str = (
+                                    _json.dumps(args) if isinstance(args, dict) else str(args)
+                                )
+                                # Feed as a single complete chunk
+                                is_new = tracker.handle_chunk(
+                                    {"id": call_id, "name": name, "args": args_str, "index": idx}
+                                )
+                                if is_new:
+                                    had_new_call = True
+                            if had_new_call and tracker.has_calls():
+                                if plan_ts is None:
+                                    plan_ts = await self._post_plan_block(
+                                        slack_channel, slack_thread_ts, tracker, run_id
+                                    )
+                                else:
+                                    await self._update_plan_block(
+                                        slack_channel, plan_ts, tracker, run_id
+                                    )
+
+                    elif msg_type == "tool":
+                        tool_call_id = message_data.get("tool_call_id", "")
+                        tool_name = message_data.get("name", "")
+                        result = message_data.get("content", "")
+                        if isinstance(result, list):
+                            result = " ".join(
+                                b.get("text", "") for b in result if isinstance(b, dict)
+                            )
+                        logger.info(
+                            f"Tool result received for call_id={tool_call_id!r} name={tool_name!r}: {str(result)[:80]}"
+                        )
+
+                        # Retroactive call entry: if we never saw the tool call start
+                        # (e.g. call start arrived as an unhandled message type), synthesize
+                        # an entry now so the plan block can still be shown.
+                        if tool_call_id and tool_call_id not in tracker.calls:
+                            logger.warning(
+                                f"Tool result for {tool_call_id!r} arrived but call was never tracked — "
+                                "retroactively adding call entry (tool call start may have had unexpected format)"
+                            )
+                            tracker.handle_chunk(
+                                {
+                                    "id": tool_call_id,
+                                    "name": tool_name or tool_call_id,
+                                    "args": "",
+                                    "index": len(tracker.calls),
+                                }
+                            )
+
+                        tracker.handle_result(tool_call_id, str(result))
+
+                        if plan_ts:
+                            await self._update_plan_block(
+                                slack_channel, plan_ts, tracker, run_id
+                            )
+                        else:
+                            # Plan block was never posted — post it now retroactively.
+                            # This handles the case where the tool call start event was
+                            # missed (unexpected message format) but we still want to
+                            # surface the tool call in Slack.
+                            logger.warning(
+                                "Tool result received but plan block not yet posted — posting retroactively"
+                            )
+                            plan_ts = await self._post_plan_block(
+                                slack_channel, slack_thread_ts, tracker, run_id
+                            )
 
                 # Skip messages not in the configured message_types list
                 if msg_type not in self.message_types:
@@ -450,6 +685,18 @@ class StreamingHandler(BaseHandler):
                 await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
 
             logger.info(f"Stream completed: {chunk_count} chunks, {len(complete_response)} chars")
+            if tracker is not None:
+                if tracker.has_calls():
+                    logger.info(
+                        f"[show_tool_calls] Detected {len(tracker.calls)} tool call(s): "
+                        f"{[c.name for c in tracker.get_calls()]}"
+                    )
+                else:
+                    logger.warning(
+                        "[show_tool_calls] Stream ended with NO tool calls detected. "
+                        "If tools were called, the call start event had an unexpected format. "
+                        "Check for non-AIMessageChunk/non-ai message types in the logs above."
+                    )
 
         except Exception as e:
             logger.error(f"Error during streaming: {e}", exc_info=True)
@@ -482,6 +729,10 @@ class StreamingHandler(BaseHandler):
             logger.info(f"Returning complete response with run_id: {run_id}")
         else:
             logger.warning("No run_id captured during streaming!")
+
+        # Finalize plan block: change title to "Done" and add "View Full Details" button
+        if plan_ts and tracker and tracker.has_calls():
+            await self._finalize_plan_block(slack_channel, plan_ts, tracker, run_id)
 
         return complete_response, run_id
 

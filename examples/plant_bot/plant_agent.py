@@ -79,7 +79,6 @@ def search_plant_images(query: str, max_results: int = 3) -> str:
     results = tavily.invoke(f"{query} images")
     return str(results)
 
-
 # Build the graph using create_agent
 # Note: checkpointer is NOT provided - LangGraph Platform handles persistence automatically
 graph = create_agent(

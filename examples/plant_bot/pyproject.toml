@@ -14,13 +14,11 @@ dependencies = [
     "langchain-anthropic>=0.3.0",
     "langchain-community>=0.3.0",
     "langgraph-cli[inmem]>=0.1.0",
-
     # Tavily search - using new langchain-tavily package
     "langchain-tavily>=0.2.0",
-
     # langgraph2slack - for local dev, install from parent directory
     # After publishing to PyPI, this would be: "langgraph2slack>=0.1.0"
-    "langgraph2slack @ file:///Users/siavashyasini/MyDrive/projects/lg2slack",
+    "langgraph2slack @ file:///Users/siavashyasini/MyDrive/projects/langgraph2slack",
 ]
 
 [project.optional-dependencies]
