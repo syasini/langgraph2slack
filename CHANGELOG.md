@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-02-24
 ### Added
 - Plan cards with live tool call tracking and visualization
 - `show_tool_calls` and `show_tool_call_details` configuration options to SlackBot
@@ -19,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - StreamingHandler now populates tool_call_store with ActiveToolCall objects
 - MessageHandler updated to support tool call display
 - Enhanced SlackBot initialization with tool_call_store management
-
 ## [0.3.0] - 2026-01-16
 ### Added
 - New `reactions` mixin for automated emoji feedback (processing, success, etc.)
