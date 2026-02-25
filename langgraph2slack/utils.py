@@ -4,7 +4,10 @@ Helper functions for message formatting, markdown conversion, and event detectio
 """
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+# Action ID for the "View Full Details" button in plan block messages
+TOOL_CALL_DETAILS_ACTION_ID = "tool_call_details"
 
 
 def is_bot_mention(text: str, bot_user_id: str) -> bool:
@@ -266,6 +269,124 @@ def create_feedback_modal(message_context: str) -> Dict:
                         "text": "Optional: Tell us how we can improve...",
                     },
                 },
+            }
+        ],
+    }
+
+
+def _make_rich_text(text: str) -> Dict:
+    """Wrap plain string as a Slack rich_text block element."""
+    return {
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": text}],
+            }
+        ],
+    }
+
+
+def _make_rich_text_code(text: str) -> Dict:
+    """Wrap plain string as a Slack rich_text preformatted (code block) element."""
+    return {
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_preformatted",
+                "elements": [{"type": "text", "text": text}],
+            }
+        ],
+    }
+
+
+def create_task_card(call, show_details: bool, run_id: Optional[str] = None) -> Dict:
+    """Build a Slack task_card block from an ActiveToolCall.
+
+    Args:
+        call: ActiveToolCall instance with name, status, args_json(), and result
+        show_details: Whether to include truncated input/output preview in the card
+        run_id: Optional LangGraph run ID for LangSmith URL source link
+
+    Returns:
+        Slack task_card block dict
+    """
+    task: Dict = {
+        "type": "task_card",
+        "task_id": call.call_id,
+        "title": call.name,
+        "status": call.status,
+    }
+
+    if show_details:
+        args = call.args_json()
+        if args.strip():
+            truncated = args[:300] + "…" if len(args) > 300 else args
+            task["details"] = _make_rich_text_code(truncated)
+
+        if call.result:
+            result_str = str(call.result)
+            truncated = result_str[:500] + "…" if len(result_str) > 500 else result_str
+            task["output"] = _make_rich_text(truncated)
+
+    if run_id:
+        task["sources"] = [
+            {
+                "type": "url",
+                "url": f"https://smith.langchain.com/runs/{run_id}",
+                "text": "LangSmith trace",
+            }
+        ]
+
+    return task
+
+
+def create_plan_block(
+    calls: List,
+    show_details: bool,
+    run_id: Optional[str] = None,
+    title: str = "Working on it...",
+) -> Dict:
+    """Build a Slack plan block containing multiple task_card blocks.
+
+    Args:
+        calls: List of ActiveToolCall instances
+        show_details: Whether to include truncated input/output in each task card
+        run_id: Optional LangGraph run ID for LangSmith source links
+        title: Plan block title (default: "Working on it...")
+
+    Returns:
+        Slack plan block dict
+    """
+    tasks = [create_task_card(c, show_details, run_id) for c in calls]
+    return {
+        "type": "plan",
+        "title": title,
+        "tasks": tasks,
+    }
+
+
+def create_tool_details_button(plan_ts: str) -> Dict:
+    """Return a Slack actions block with a 'View Full Details' button.
+
+    When clicked, the button triggers the tool_call_details action handler,
+    which opens a modal with untruncated tool call inputs and outputs.
+
+    Args:
+        plan_ts: Slack message timestamp of the plan block message.
+                 Used as the key to look up stored tool call data.
+
+    Returns:
+        Slack actions block dict with a single button element
+    """
+    return {
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "action_id": TOOL_CALL_DETAILS_ACTION_ID,
+                "text": {"type": "plain_text", "text": "View Full Details"},
+                "value": plan_ts,
             }
         ],
     }

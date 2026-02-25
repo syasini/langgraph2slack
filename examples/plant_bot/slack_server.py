@@ -19,7 +19,9 @@ bot = SlackBot(
                     {"emoji": "hourglass", "target": "bot", "when": "processing", "persist": False},
                     {"emoji": "eyes", "target": "user", "when": "processing", "persist":False}
                 ],
-    stream_buffer_time=0.1
+    stream_buffer_time=0.1,
+    show_tool_calls=True,
+    show_tool_call_details=True,
     )
 
 

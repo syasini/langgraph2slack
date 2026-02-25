@@ -8,8 +8,9 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from ..config import MessageContext
+from ..tool_calls import ActiveToolCall
 from ..transformers import TransformerChain
-from ..utils import clean_markdown
+from ..utils import clean_markdown, create_plan_block, create_tool_details_button
 from .base import BaseHandler
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,11 @@ class MessageHandler(BaseHandler):
         extract_images: bool = True,
         max_image_blocks: int = 5,
         metadata_builder=None,
+        slack_client=None,
+        reply_in_thread: bool = True,
+        show_tool_calls: bool = False,
+        show_tool_call_details: bool = True,
+        tool_call_store: Optional[Dict] = None,
     ):
         """Initialize message handler.
 
@@ -53,6 +59,11 @@ class MessageHandler(BaseHandler):
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
+            slack_client: Slack Bolt AsyncApp (required when show_tool_calls=True)
+            reply_in_thread: Reply in thread vs main channel (default: True)
+            show_tool_calls: Show plan block with tool call status (default: False)
+            show_tool_call_details: Show truncated input/output + View Details button (default: True)
+            tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall]
         """
         # Initialize base class
         super().__init__(
@@ -63,10 +74,15 @@ class MessageHandler(BaseHandler):
             show_thread_id=show_thread_id,
             extract_images=extract_images,
             max_image_blocks=max_image_blocks,
+            show_tool_calls=show_tool_calls,
+            show_tool_call_details=show_tool_call_details,
+            tool_call_store=tool_call_store,
         )
         # Store handler-specific attributes
         self.client = langgraph_client
         self.metadata_builder = metadata_builder
+        self.slack_client = slack_client
+        self.reply_in_thread = reply_in_thread
 
     async def process_message(
         self,
@@ -105,21 +121,150 @@ class MessageHandler(BaseHandler):
             transformed_input, langgraph_thread, context
         )
 
-        # Step 4: Extract the actual message content
+        # Step 4: Post plan block with tool call details (if enabled)
+        # This goes BEFORE the text response so users see what the agent did first.
+        if self.show_tool_calls and self.slack_client:
+            slack_thread_ts = (
+                context.thread_ts or context.message_ts
+                if self.reply_in_thread
+                else context.thread_ts
+            )
+            await self._post_tool_calls_plan(
+                langgraph_response, context.channel_id, slack_thread_ts, run_id
+            )
+
+        # Step 5: Extract the actual message content
         response_text = self._extract_message_content(langgraph_response)
         logger.debug(f"LangGraph response: {response_text[:100]}...")
 
-        # Step 5: Apply output transformers
+        # Step 6: Apply output transformers
         # Each transformer can modify the response (add footer, filter, etc.)
         transformed_output = await self.output_transformers.apply(response_text, context)
 
-        # Step 6: Convert markdown to Slack's format
+        # Step 7: Convert markdown to Slack's format
         slack_formatted = clean_markdown(transformed_output)
 
-        # Step 7: Extract markdown images and create blocks
+        # Step 8: Extract markdown images and create blocks
         blocks = self._create_blocks(transformed_output, langgraph_thread)
 
         return slack_formatted, blocks, langgraph_thread, run_id
+
+    def _extract_tool_calls_from_messages(
+        self, langgraph_response: dict
+    ) -> List[ActiveToolCall]:
+        """Extract tool calls and their results from a completed LangGraph run.
+
+        Scans the full message list from the completed run to find:
+        - AIMessages with non-empty tool_calls (each call gets an ActiveToolCall)
+        - ToolMessages with matching tool_call_id (provides the result)
+
+        Args:
+            langgraph_response: Full response dict from LangGraph run (runs.join() result)
+
+        Returns:
+            List of ActiveToolCall instances with complete data (name, args, result, status)
+        """
+        messages = langgraph_response.get("messages", [])
+        if not messages:
+            return []
+
+        # Build index of ToolMessage results keyed by tool_call_id
+        tool_results: Dict[str, str] = {}
+        for msg in messages:
+            if msg.get("type") == "tool":
+                tool_call_id = msg.get("tool_call_id", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        b.get("text", "") for b in content if isinstance(b, dict)
+                    )
+                if tool_call_id:
+                    tool_results[tool_call_id] = str(content)
+
+        # Build ActiveToolCall list from AIMessages with tool_calls
+        calls: List[ActiveToolCall] = []
+        for msg in messages:
+            if msg.get("type") not in ("ai", "AIMessage"):
+                continue
+            for tc in msg.get("tool_calls", []):
+                call_id = tc.get("id", f"call_{len(calls)}")
+                name = tc.get("name", "unknown_tool")
+                # args can be a dict or a JSON string
+                args = tc.get("args", {})
+                if isinstance(args, dict):
+                    import json
+                    args_str = json.dumps(args, indent=2)
+                else:
+                    args_str = str(args)
+
+                result = tool_results.get(call_id)
+                call = ActiveToolCall(
+                    call_id=call_id,
+                    name=name,
+                    args_chunks=[args_str],
+                    status="complete" if result is not None else "in_progress",
+                    result=result,
+                )
+                calls.append(call)
+
+        return calls
+
+    async def _post_tool_calls_plan(
+        self,
+        langgraph_response: dict,
+        channel_id: str,
+        thread_ts: Optional[str],
+        run_id: Optional[str],
+    ) -> None:
+        """Extract tool calls from the completed run and post a plan block to Slack.
+
+        Args:
+            langgraph_response: Full response dict from LangGraph run
+            channel_id: Slack channel ID
+            thread_ts: Slack thread timestamp (plan block goes in the same thread)
+            run_id: Optional LangGraph run ID for LangSmith source links
+        """
+        calls = self._extract_tool_calls_from_messages(langgraph_response)
+        if not calls:
+            return
+
+        title = "Done"
+        plan_block = create_plan_block(calls, self.show_tool_call_details, run_id, title)
+        blocks = [plan_block]
+        if self.show_tool_call_details:
+            # Button value will be set after we know plan_ts
+            # Post first, then update with the correct plan_ts button value
+            try:
+                response = await self.slack_client.client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=title,
+                    blocks=blocks,
+                )
+                plan_ts = response.get("ts")
+                if plan_ts:
+                    self.tool_call_store[plan_ts] = calls
+                    # Update with the View Details button (now we know plan_ts)
+                    blocks_with_button = [plan_block, create_tool_details_button(plan_ts)]
+                    await self.slack_client.client.chat_update(
+                        channel=channel_id,
+                        ts=plan_ts,
+                        text=title,
+                        blocks=blocks_with_button,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to post/update tool call plan block: {e}")
+        else:
+            # No details button needed - single post
+            try:
+                await self.slack_client.client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=title,
+                    blocks=blocks,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to post tool call plan block: {e}")
 
     async def _invoke_langgraph(
         self, message: str, thread_id: str, context: MessageContext

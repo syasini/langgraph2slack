@@ -9,7 +9,8 @@
     "langgraph2slack"
   ],
   "graphs": {
-    "plant_agent": "./plant_agent.py:graph"
+    "plant_agent": "./plant_agent.py:graph",
+    "plant_agent_langgraph": "./plant_agent_langgraph.py:graph"
   },
   "env": ".env",
   "http": {
