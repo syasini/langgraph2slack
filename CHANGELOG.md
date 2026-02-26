@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Built-in block transformer library (`langgraph2slack.block_transformers`) with four ready-to-use async transformers:
+  - `render_tables` — markdown tables → Slack table blocks
+  - `render_todo_lists` — markdown todo lists (`- [ ]`/`- [x]`) → section blocks with ☐/☑
+  - `render_code_blocks` — triple-backtick fences → Slack rich_text preformatted blocks
+  - `render_blocks` — composite transformer scanning all patterns in document order
+
+### Changed
+- Removed `structured_output` mode in favor of text-first custom block transformer approach
+- Improved streaming reliability and chunk processing in `StreamingHandler`
+- Updated `slack_server.py` example with block transformer usage patterns
 
 ## [0.4.0] - 2026-02-24
 ### Added
