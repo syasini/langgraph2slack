@@ -13,7 +13,7 @@ from typing import Optional
 from ..config import MessageContext
 from ..transformers import TransformerChain
 from ..tool_calls import ToolCallTracker
-from ..utils import clean_markdown, create_plan_block, create_tool_details_button
+from ..utils import clean_markdown, create_plan_block, create_tool_details_button, remove_markdown_images
 from ..mixins import ReactionMixin
 from .base import BaseHandler
 
@@ -877,7 +877,30 @@ class StreamingHandler(BaseHandler):
                             f" + {len(blocks) - len(custom_blocks)} feedback blocks"
                         )
                     except Exception as block_error:
-                        logger.error(f"Failed to update with custom blocks: {block_error}")
+                        logger.warning(f"Failed to update with custom blocks: {block_error}")
+                        logger.debug("Retrying with text + feedback blocks (degraded custom blocks)")
+
+                        from ..utils import create_feedback_block
+
+                        feedback_only_blocks = create_feedback_block(
+                            thread_id=thread_id,
+                            show_feedback_buttons=self.show_feedback_buttons,
+                            show_thread_id=self.show_thread_id,
+                        )
+                        slack_text = clean_markdown(complete_response, for_blocks=True) or " "
+                        text_block = {"type": "section", "text": {"type": "mrkdwn", "text": slack_text}}
+                        fallback_blocks = [text_block] + feedback_only_blocks
+
+                        try:
+                            await self.slack_client.client.chat_update(
+                                channel=channel_id,
+                                ts=stream_ts,
+                                text=fallback_text,
+                                blocks=fallback_blocks,
+                            )
+                            logger.info("Custom blocks failed; sent text + feedback blocks as fallback")
+                        except Exception as fallback_error:
+                            logger.error(f"Failed even with fallback blocks: {fallback_error}")
 
             else:
                 # ---------------------------------------------------------------
@@ -899,7 +922,7 @@ class StreamingHandler(BaseHandler):
                     await asyncio.sleep(0.5)
 
                     # Remove image markdown from text (since we're showing them as image blocks)
-                    text_without_images = re.sub(r"!\[([^\]]*)\]\(.+?\)", "", display_text)
+                    text_without_images = remove_markdown_images(display_text)
 
                     # Convert to Slack block format (for_blocks=True converts **bold** -> *bold*, etc.)
                     slack_text = clean_markdown(text_without_images, for_blocks=True)

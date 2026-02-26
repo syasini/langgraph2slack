@@ -385,66 +385,42 @@ class TestReactionHelpers:
 
 
 class TestNonStreamingCustomBlocks:
-    """Verify that custom blocks from a transformer are not auto-prefixed with a text section."""
+    """Verify that _prepare_send_blocks() correctly handles custom vs standard block layouts."""
 
-    @pytest.mark.asyncio
-    async def test_custom_blocks_not_prefixed_with_text_section(self, minimal_bot):
-        """When handler returns has_custom_blocks=True, bot should NOT prepend a text section block.
-
-        Regression test for the inconsistency found in the code review:
-        streaming correctly used custom blocks as-is, but non-streaming unconditionally
-        prepended a text section even when a transformer returned a full custom layout.
-        """
+    def test_custom_blocks_not_prefixed_with_text_section(self, minimal_bot):
+        """When has_custom_blocks=True, _prepare_send_blocks should return blocks unchanged."""
         custom_block = {"type": "section", "text": {"type": "mrkdwn", "text": "Custom content"}}
         feedback_block = {"type": "actions", "elements": []}
+        blocks = [custom_block, feedback_block]
 
-        # Mock handler.process_message to return custom blocks (has_custom_blocks=True)
-        minimal_bot.handler = MagicMock()
-        minimal_bot.handler.process_message = AsyncMock(
-            return_value=("Fallback text", [custom_block, feedback_block], "thread-id", "run-id", True)
-        )
+        result = minimal_bot._prepare_send_blocks(blocks, "Fallback text", has_custom_blocks=True)
 
-        # Capture what blocks are sent via say()
-        sent_blocks = []
-
-        async def mock_say(**kwargs):
-            if "blocks" in kwargs:
-                sent_blocks.extend(kwargs["blocks"])
-            return {"ts": "1234567.890"}
-
-        # Simulate the bot's send logic directly (mirrors bot.py non-streaming path)
-        response_text, blocks, thread_id, run_id, has_custom_blocks = \
-            await minimal_bot.handler.process_message("test", None)
-
-        # Apply the same conditional logic as bot.py
-        if blocks and not has_custom_blocks:
-            text_block = {"type": "section", "text": {"type": "mrkdwn", "text": response_text}}
-            blocks = [text_block] + blocks
-
-        # With has_custom_blocks=True, no text section should have been prepended
-        assert blocks[0] == custom_block, "Custom block should be first — no text section prepended"
+        assert result[0] == custom_block, "Custom block should be first — no text section prepended"
         assert not any(
             b == {"type": "section", "text": {"type": "mrkdwn", "text": "Fallback text"}}
-            for b in blocks
+            for b in result
         ), "Fallback text section should not appear when has_custom_blocks=True"
 
-    @pytest.mark.asyncio
-    async def test_text_blocks_get_text_section_prepended(self, minimal_bot):
-        """When handler returns has_custom_blocks=False (text path), text section IS prepended."""
+    def test_text_blocks_get_text_section_prepended(self, minimal_bot):
+        """When has_custom_blocks=False, _prepare_send_blocks should prepend a text section."""
         feedback_block = {"type": "actions", "elements": []}
+        blocks = [feedback_block]
 
-        minimal_bot.handler = MagicMock()
-        minimal_bot.handler.process_message = AsyncMock(
-            return_value=("The response text", [feedback_block], "thread-id", "run-id", False)
+        result = minimal_bot._prepare_send_blocks(blocks, "The response text", has_custom_blocks=False)
+
+        assert result[0]["type"] == "section"
+        assert result[0]["text"]["text"] == "The response text"
+        assert result[1] == feedback_block
+
+    def test_empty_blocks_returned_unchanged(self, minimal_bot):
+        """Empty block list should be returned as-is regardless of has_custom_blocks."""
+        assert minimal_bot._prepare_send_blocks([], "text", has_custom_blocks=False) == []
+        assert minimal_bot._prepare_send_blocks([], "text", has_custom_blocks=True) == []
+
+    def test_text_section_content_matches_response_text(self, minimal_bot):
+        """Prepended text section should contain the exact response_text passed in."""
+        feedback_block = {"type": "context", "elements": []}
+        result = minimal_bot._prepare_send_blocks(
+            [feedback_block], "Hello *world*", has_custom_blocks=False
         )
-
-        response_text, blocks, thread_id, run_id, has_custom_blocks = \
-            await minimal_bot.handler.process_message("test", None)
-
-        if blocks and not has_custom_blocks:
-            text_block = {"type": "section", "text": {"type": "mrkdwn", "text": response_text}}
-            blocks = [text_block] + blocks
-
-        # Text section should be first when has_custom_blocks=False
-        assert blocks[0]["type"] == "section"
-        assert blocks[0]["text"]["text"] == "The response text"
+        assert result[0]["text"]["text"] == "Hello *world*"

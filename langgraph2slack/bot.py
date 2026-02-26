@@ -636,6 +636,35 @@ class SlackBot:
 
         return app
 
+    def _prepare_send_blocks(
+        self,
+        blocks: list,
+        response_text: str,
+        has_custom_blocks: bool,
+    ) -> list:
+        """Prepend a text section to standard block layouts.
+
+        When a transformer returned custom blocks they already encode the full
+        layout, so nothing is added. For the default image/feedback layout we
+        prepend the response text as a mrkdwn section so the text remains
+        visible alongside the blocks.
+
+        Args:
+            blocks: Block list returned by the handler.
+            response_text: Formatted response text (used only for standard layout).
+            has_custom_blocks: True when blocks came from a transformer.
+
+        Returns:
+            Final block list ready to send to Slack.
+        """
+        if blocks and not has_custom_blocks:
+            text_block = {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": response_text},
+            }
+            return [text_block] + blocks
+        return blocks
+
     async def _build_metadata(self, context: MessageContext) -> dict:
         """Build metadata dict from Slack context.
 
@@ -786,15 +815,8 @@ class SlackBot:
                         f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks"
                     )
 
-                    # Prepend a text section only when blocks are image/feedback blocks.
-                    # When a transformer returned custom blocks, those ARE the layout — don't add extra text.
-                    if blocks and not has_custom_blocks:
-                        text_block = {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": response_text},
-                        }
-                        blocks = [text_block] + blocks
-                        logger.info(f"Added text block, total blocks: {len(blocks)}")
+                    blocks = self._prepare_send_blocks(blocks, response_text, has_custom_blocks)
+                    logger.info(f"Prepared blocks for send: {len(blocks)} total")
 
                     # Update placeholder or send new message
                     if placeholder_ts:
