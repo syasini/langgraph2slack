@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.5.0] - 2026-02-26
 ### Added
 - Built-in block transformer library (`langgraph2slack.block_transformers`) with four ready-to-use async transformers:
   - `render_tables` — markdown tables → Slack table blocks
@@ -17,7 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `structured_output` mode in favor of text-first custom block transformer approach
 - Improved streaming reliability and chunk processing in `StreamingHandler`
 - Updated `slack_server.py` example with block transformer usage patterns
-
 ## [0.4.0] - 2026-02-24
 ### Added
 - Plan cards with live tool call tracking and visualization
