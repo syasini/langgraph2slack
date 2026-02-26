@@ -208,39 +208,28 @@ class TestTransformerChain:
 
     @pytest.mark.asyncio
     async def test_transformer_returns_none_handled_gracefully(self, message_context_dm):
-        """Transformer returning None should be handled gracefully.
-
-        Current implementation will pass None to next transformer.
-        This may cause errors in subsequent transformers, which is OK
-        (fail fast behavior).
-        """
+        """Transformer returning None should keep the previous value with a warning."""
         chain = TransformerChain()
 
         @chain.add
         async def returns_none(message: str) -> str:
             return None  # Oops! Should return string
 
-        # This will return None, which may cause issues
-        # We're testing that it doesn't crash in the chain itself
+        # None is treated as a mistake: previous value is kept
         result = await chain.apply("test", message_context_dm)
-        assert result is None
+        assert result == "test"
 
     @pytest.mark.asyncio
     async def test_transformer_returns_wrong_type_passes_through(self, message_context_dm):
-        """Transformer returning wrong type should pass through.
-
-        TransformerChain doesn't do runtime type checking.
-        It's up to transformers to return correct types.
-        """
+        """Transformer returning an unsupported type should raise TypeError."""
         chain = TransformerChain()
 
         @chain.add
         async def returns_int(message: str) -> str:
             return 12345  # Wrong type!
 
-        # Will return int instead of string
-        result = await chain.apply("test", message_context_dm)
-        assert result == 12345  # Type error, but doesn't crash
+        with pytest.raises(TypeError, match="returned int"):
+            await chain.apply("test", message_context_dm)
 
     @pytest.mark.asyncio
     async def test_exception_in_middle_transformer_stops_chain(self, message_context_dm):
