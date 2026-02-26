@@ -505,7 +505,7 @@ class TestProcessMessage:
             context=sample_context
         )
 
-        formatted_text, blocks, thread_id, run_id = result
+        formatted_text, blocks, thread_id, run_id, has_custom_blocks = result
 
         # Verify response text
         assert formatted_text == "Hi there! How can I help?"
@@ -528,7 +528,7 @@ class TestProcessMessage:
             context=sample_context
         )
 
-        formatted_text, blocks, thread_id, run_id = result
+        formatted_text, blocks, thread_id, run_id, has_custom_blocks = result
 
         # Output transformer adds " [OUTPUT]" suffix
         assert formatted_text.endswith(" [OUTPUT]")
@@ -551,8 +551,8 @@ class TestProcessMessage:
             "ts": "1234567.890"  # Same timestamp
         })
 
-        _, _, thread_id_1, _ = await basic_handler.process_message("Test", context1)
-        _, _, thread_id_2, _ = await basic_handler.process_message("Test", context2)
+        _, _, thread_id_1, _, _ = await basic_handler.process_message("Test", context1)
+        _, _, thread_id_2, _, _ = await basic_handler.process_message("Test", context2)
 
         # Same channel + timestamp = same thread
         assert thread_id_1 == thread_id_2
@@ -577,8 +577,8 @@ class TestProcessMessage:
             "ts": "1234567.890"  # Same as thread_ts above
         })
 
-        _, _, thread_id_1, _ = await basic_handler.process_message("Test", thread_context)
-        _, _, thread_id_2, _ = await basic_handler.process_message("Test", standalone_context)
+        _, _, thread_id_1, _, _ = await basic_handler.process_message("Test", thread_context)
+        _, _, thread_id_2, _, _ = await basic_handler.process_message("Test", standalone_context)
 
         # Should use thread_ts, so thread_ids should match
         assert thread_id_1 == thread_id_2
@@ -594,7 +594,7 @@ class TestProcessMessage:
             }]
         })
 
-        formatted_text, _, _, _ = await basic_handler.process_message("Test", sample_context)
+        formatted_text, _, _, _, _ = await basic_handler.process_message("Test", sample_context)
 
         # Markdown should be converted to Slack format
         assert "<https://example.com|this link>" in formatted_text
@@ -610,7 +610,7 @@ class TestProcessMessage:
             }]
         })
 
-        _, blocks, _, _ = await basic_handler.process_message("Test", sample_context)
+        _, blocks, _, _, _ = await basic_handler.process_message("Test", sample_context)
 
         # Should have image blocks
         image_blocks = [b for b in blocks if b.get("type") == "image"]
@@ -627,7 +627,7 @@ class TestProcessMessage:
             "ts": "1234567.890"
         })
 
-        formatted_text, _, thread_id, _ = await basic_handler.process_message("Hello", dm_context)
+        formatted_text, _, thread_id, _, _ = await basic_handler.process_message("Hello", dm_context)
 
         assert formatted_text is not None
         assert thread_id is not None
@@ -646,7 +646,7 @@ class TestEdgeCases:
         """Empty message should be processed (LangGraph may still respond)."""
         result = await basic_handler.process_message("", sample_context)
 
-        formatted_text, blocks, thread_id, run_id = result
+        formatted_text, blocks, thread_id, run_id, has_custom_blocks = result
 
         # Should still work (LangGraph decides how to handle empty input)
         assert formatted_text is not None
@@ -659,7 +659,7 @@ class TestEdgeCases:
 
         result = await basic_handler.process_message(long_message, sample_context)
 
-        formatted_text, _, _, _ = result
+        formatted_text, _, _, _, _ = result
         assert formatted_text is not None
 
     @pytest.mark.asyncio
@@ -669,5 +669,86 @@ class TestEdgeCases:
 
         result = await basic_handler.process_message(special_message, sample_context)
 
-        formatted_text, _, _, _ = result
+        formatted_text, _, _, _, _ = result
         assert formatted_text is not None
+
+
+# ============================================================================
+# Block-Returning Transformers
+# ============================================================================
+
+
+class TestCustomBlockTransformers:
+    """Tests for output transformers that return Slack block lists."""
+
+    @pytest.mark.asyncio
+    async def test_transformer_returning_blocks_sets_has_custom_blocks(
+        self, mock_langgraph_client, sample_context
+    ):
+        """When a transformer returns list[dict], has_custom_blocks should be True."""
+        output_chain = TransformerChain()
+
+        @output_chain.add
+        async def render_as_blocks(text: str):
+            return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+        handler = MessageHandler(
+            langgraph_client=mock_langgraph_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=output_chain,
+        )
+
+        _, blocks, _, _, has_custom_blocks = await handler.process_message("Hi", sample_context)
+
+        assert has_custom_blocks is True
+        # Custom blocks should be in the block list (plus any feedback blocks)
+        section_blocks = [b for b in blocks if b.get("type") == "section"]
+        assert len(section_blocks) >= 1
+
+    @pytest.mark.asyncio
+    async def test_transformer_returning_string_sets_has_custom_blocks_false(
+        self, basic_handler, sample_context
+    ):
+        """When no transformer or a string-returning transformer is used, has_custom_blocks is False."""
+        _, _, _, _, has_custom_blocks = await basic_handler.process_message("Hi", sample_context)
+        assert has_custom_blocks is False
+
+    @pytest.mark.asyncio
+    async def test_chain_short_circuits_on_blocks(self, mock_langgraph_client, sample_context):
+        """When first transformer returns blocks, second transformer should not be called."""
+        call_log = []
+        output_chain = TransformerChain()
+
+        @output_chain.add
+        async def first_returns_blocks(text: str):
+            call_log.append("first")
+            return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+        @output_chain.add
+        async def second_should_not_run(text):
+            call_log.append("second")
+            return text
+
+        handler = MessageHandler(
+            langgraph_client=mock_langgraph_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=output_chain,
+        )
+
+        await handler.process_message("Hi", sample_context)
+
+        assert "first" in call_log
+        assert "second" not in call_log  # chain short-circuited
+
+    @pytest.mark.asyncio
+    async def test_no_transformer_returns_safe_text(self, basic_handler, sample_context):
+        """With no output transformers, response should be a string with has_custom_blocks=False."""
+        formatted_text, blocks, _, _, has_custom_blocks = await basic_handler.process_message(
+            "Hi", sample_context
+        )
+
+        assert isinstance(formatted_text, str)
+        assert has_custom_blocks is False
+        assert isinstance(blocks, list)

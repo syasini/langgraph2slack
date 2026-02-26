@@ -275,7 +275,7 @@ class TestStreamFromLangGraphToSlack:
     @pytest.mark.asyncio
     async def test_stream_basic_three_chunks(self, basic_streaming_handler, sample_context):
         """Should stream 3 chunks and accumulate them correctly."""
-        complete_response, run_id = await basic_streaming_handler._stream_from_langgraph_to_slack(
+        transformed, complete_response, run_id = await basic_streaming_handler._stream_from_langgraph_to_slack(
             message="Test message",
             langgraph_thread="thread-123",
             slack_channel="C456CHANNEL",
@@ -328,7 +328,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        _, run_id = await handler._stream_from_langgraph_to_slack(
+        _, _, run_id = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -372,7 +372,7 @@ class TestStreamFromLangGraphToSlack:
             message_types=["AIMessageChunk"]  # Only process AIMessageChunk
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -415,7 +415,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -458,7 +458,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -504,7 +504,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -535,7 +535,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=output_chain,
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        transformed, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -543,9 +543,9 @@ class TestStreamFromLangGraphToSlack:
             context=sample_context
         )
 
-        # Output transformer should be applied
-        assert "Hello world!" in complete_response
-        assert "_Powered by AI_" in complete_response
+        # Output transformer should be applied to the transformed output
+        assert "Hello world!" in complete_response  # raw accumulated text
+        assert "_Powered by AI_" in transformed  # transformer appended footer
 
     @pytest.mark.asyncio
     async def test_stream_handles_streaming_error(self, mock_langgraph_client, mock_slack_client, sample_context):
@@ -569,7 +569,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -637,7 +637,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, run_id = await handler._stream_from_langgraph_to_slack(
+        transformed, complete_response, run_id = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -795,6 +795,131 @@ class TestStopSlackStream:
         )
 
         # If we get here, error was handled
+
+
+# ============================================================================
+# Tests: _stop_slack_stream() - Custom Block Path
+# ============================================================================
+
+
+class TestStopSlackStreamCustomBlocks:
+    """Tests for _stop_slack_stream() when a transformer returns custom blocks."""
+
+    @pytest.mark.asyncio
+    async def test_custom_blocks_sent_via_chat_update(self, basic_streaming_handler):
+        """chat_update should be called with the transformer's custom blocks."""
+        custom_blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "Custom layout"}},
+        ]
+
+        await basic_streaming_handler._stop_slack_stream(
+            channel_id="C123",
+            stream_ts="1234567.890",
+            complete_response="Raw streamed text",
+            transformed=custom_blocks,
+            thread_id="thread-123",
+        )
+
+        basic_streaming_handler.slack_client.client.chat_stopStream.assert_called_once()
+        basic_streaming_handler.slack_client.client.chat_update.assert_called_once()
+
+        call_kwargs = basic_streaming_handler.slack_client.client.chat_update.call_args.kwargs
+        assert any(
+            b == {"type": "section", "text": {"type": "mrkdwn", "text": "Custom layout"}}
+            for b in call_kwargs["blocks"]
+        ), "Custom block should appear in chat_update payload"
+
+    @pytest.mark.asyncio
+    async def test_custom_blocks_fallback_on_update_failure(
+        self, basic_streaming_handler, mock_slack_client
+    ):
+        """On chat_update failure with custom blocks, should fall back to text + feedback blocks."""
+        custom_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "Custom"}}]
+
+        call_count = [0]
+
+        async def update_with_fallback(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("Invalid blocks")
+            return {"ok": True}
+
+        mock_slack_client.client.chat_update = AsyncMock(side_effect=update_with_fallback)
+
+        await basic_streaming_handler._stop_slack_stream(
+            channel_id="C123",
+            stream_ts="1234567.890",
+            complete_response="Raw text",
+            transformed=custom_blocks,
+            thread_id="thread-123",
+        )
+
+        # Should have tried twice: once with custom blocks, once with fallback
+        assert mock_slack_client.client.chat_update.call_count == 2
+
+        # Fallback call should contain a plain text section, not the custom content
+        fallback_kwargs = mock_slack_client.client.chat_update.call_args.kwargs
+        custom_content_in_fallback = [
+            b for b in fallback_kwargs.get("blocks", [])
+            if b.get("text", {}).get("text") == "Custom"
+        ]
+        assert len(custom_content_in_fallback) == 0, (
+            "Custom block content should not appear in the fallback payload"
+        )
+        # Fallback should still have a section block (the text)
+        section_blocks = [b for b in fallback_kwargs.get("blocks", []) if b.get("type") == "section"]
+        assert len(section_blocks) >= 1, "Fallback should contain at least a text section block"
+
+    @pytest.mark.asyncio
+    async def test_custom_blocks_fallback_also_fails_no_raise(
+        self, basic_streaming_handler, mock_slack_client
+    ):
+        """Should log error without raising if even fallback update fails."""
+        custom_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "Custom"}}]
+        mock_slack_client.client.chat_update = AsyncMock(
+            side_effect=Exception("All updates fail")
+        )
+
+        # Must not raise
+        await basic_streaming_handler._stop_slack_stream(
+            channel_id="C123",
+            stream_ts="1234567.890",
+            complete_response="Raw text",
+            transformed=custom_blocks,
+            thread_id="thread-123",
+        )
+
+    @pytest.mark.asyncio
+    async def test_output_transformer_blocks_reach_chat_update(
+        self, mock_langgraph_client, mock_slack_client, sample_context
+    ):
+        """End-to-end: output transformer returning blocks → correct chat_update payload."""
+        output_chain = TransformerChain()
+
+        @output_chain.add
+        async def render_as_blocks(text: str):
+            return [{"type": "section", "text": {"type": "mrkdwn", "text": f"[CUSTOM] {text}"}}]
+
+        handler = StreamingHandler(
+            langgraph_client=mock_langgraph_client,
+            slack_client=mock_slack_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=output_chain,
+        )
+
+        await handler.process_message(message="Show me a table", context=sample_context)
+
+        mock_slack_client.client.chat_update.assert_called_once()
+        call_kwargs = mock_slack_client.client.chat_update.call_args.kwargs
+
+        block_texts = [
+            b.get("text", {}).get("text", "")
+            for b in call_kwargs.get("blocks", [])
+        ]
+        assert any("[CUSTOM]" in t for t in block_texts), (
+            "Transformer-generated block content should appear in chat_update payload"
+        )
 
 
 # ============================================================================

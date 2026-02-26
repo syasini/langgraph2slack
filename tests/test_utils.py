@@ -11,6 +11,7 @@ import pytest
 from langgraph2slack.utils import (
     clean_markdown,
     extract_markdown_images,
+    remove_markdown_images,
     is_bot_mention,
     is_dm,
     create_feedback_block,
@@ -370,6 +371,72 @@ class TestExtractMarkdownImages:
 
         assert len(blocks) == 1
         assert blocks[0]["image_url"] == "https://example.com/doc.html#section1"
+
+
+# ============================================================================
+# Tests for remove_markdown_images()
+# ============================================================================
+
+
+class TestRemoveMarkdownImages:
+    """Tests for stripping markdown image syntax from text."""
+
+    def test_removes_simple_image(self):
+        """Basic image reference should be removed."""
+        text = "See ![chart](https://example.com/chart.png) above."
+        result = remove_markdown_images(text)
+        assert "![chart]" not in result
+        assert "See" in result
+        assert "above." in result
+
+    def test_preserves_surrounding_text(self):
+        """Text before and after image should be preserved."""
+        text = "Before ![img](https://example.com/img.png) after"
+        result = remove_markdown_images(text)
+        assert result == "Before  after"
+
+    def test_removes_multiple_images(self):
+        """All image references should be removed."""
+        text = "![a](url1) text ![b](url2) more ![c](url3)"
+        result = remove_markdown_images(text)
+        assert "![" not in result
+        assert "text" in result
+        assert "more" in result
+
+    def test_url_with_parentheses(self):
+        """URLs containing parentheses must be fully removed — the key correctness case.
+
+        The naive regex r'!\\[.*?\\]\\(.+?\\)' truncates at the first ')' inside the URL,
+        leaving residual text like '_(plant)' in the output. The balanced-parens
+        pattern handles this correctly.
+        """
+        text = "Plant: ![Monstera](https://en.wikipedia.org/wiki/Monstera_(plant))"
+        result = remove_markdown_images(text)
+        assert result == "Plant: "
+        assert "_(plant)" not in result
+        assert "Monstera_(plant)" not in result
+
+    def test_empty_alt_text(self):
+        """Empty alt text should still remove the image."""
+        text = "See ![](https://example.com/img.png) here."
+        result = remove_markdown_images(text)
+        assert "![" not in result
+        assert "See" in result
+
+    def test_no_images_returns_unchanged(self):
+        """Text without images should pass through unchanged."""
+        text = "Just some plain text with no images."
+        assert remove_markdown_images(text) == text
+
+    def test_empty_string(self):
+        """Empty string should return empty string."""
+        assert remove_markdown_images("") == ""
+
+    def test_does_not_remove_plain_links(self):
+        """Regular markdown links [text](url) should NOT be removed."""
+        text = "Check [this link](https://example.com) for details."
+        result = remove_markdown_images(text)
+        assert "[this link]" in result
 
 
 # ============================================================================

@@ -10,7 +10,8 @@
   ],
   "graphs": {
     "plant_agent": "./plant_agent.py:graph",
-    "plant_agent_langgraph": "./plant_agent_langgraph.py:graph"
+    "plant_agent_langgraph": "./plant_agent_langgraph.py:graph",
+    "plant_agent_structured": "./plant_agent_structured.py:graph"
   },
   "env": ".env",
   "http": {

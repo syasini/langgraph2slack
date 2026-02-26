@@ -175,6 +175,29 @@ def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
     return image_blocks
 
 
+def remove_markdown_images(text: str) -> str:
+    """Remove markdown image syntax from text.
+
+    Strips all ``![alt](url)`` occurrences using the same balanced-parentheses
+    URL pattern as :func:`extract_markdown_images`, so URLs containing
+    parentheses (e.g. Wikipedia links) are handled correctly.
+
+    Args:
+        text: Text possibly containing markdown image syntax.
+
+    Returns:
+        Text with all markdown image references removed.
+
+    Example:
+        >>> remove_markdown_images("See ![chart](https://example.com/chart.png) above.")
+        'See  above.'
+        >>> remove_markdown_images("Plant: ![name](https://wiki.org/Monstera_(plant))")
+        'Plant: '
+    """
+    url_pattern = r"(?:[^()]|\([^()]*\))+"
+    return re.sub(rf"!\[([^\]]*)\]\(({url_pattern})\)", "", text)
+
+
 def create_feedback_block(
     thread_id: str = None,
     show_feedback_buttons: bool = True,

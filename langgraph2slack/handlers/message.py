@@ -88,21 +88,27 @@ class MessageHandler(BaseHandler):
         self,
         message: str,
         context: MessageContext,
-    ) -> Tuple[str, List[Dict], Optional[str], Optional[str]]:
+    ) -> Tuple[str, List[Dict], Optional[str], Optional[str], bool]:
         """Process a message through the full pipeline.
 
         Main entry point for non-streaming message processing.
+
+        Unlike ``StreamingHandler.process_message()`` which manages the full Slack
+        lifecycle internally, this handler returns the composed text and blocks for
+        the caller (``SlackBot``) to send via ``say()`` or ``chat_update()``. The
+        caller uses ``has_custom_blocks`` to decide whether to prepend a text section.
 
         Args:
             message: Raw message text from Slack
             context: Message context with user/channel info
 
         Returns:
-            Tuple of (formatted_text, blocks, thread_id, run_id)
-            - formatted_text: Processed response ready to send to Slack
-            - blocks: List of Slack blocks (images + feedback)
+            Tuple of (formatted_text, blocks, thread_id, run_id, has_custom_blocks)
+            - formatted_text: Processed response ready to send to Slack (or notification fallback)
+            - blocks: List of Slack blocks (custom layout or image/feedback blocks)
             - thread_id: LangGraph thread ID
             - run_id: LangGraph run ID for feedback
+            - has_custom_blocks: True when blocks came from a transformer (caller should NOT prepend text section)
         """
         logger.info(
             f"Processing message from user {context.user_id} in channel {context.channel_id}"
@@ -133,21 +139,49 @@ class MessageHandler(BaseHandler):
                 langgraph_response, context.channel_id, slack_thread_ts, run_id
             )
 
-        # Step 5: Extract the actual message content
-        response_text = self._extract_message_content(langgraph_response)
-        logger.debug(f"LangGraph response: {response_text[:100]}...")
+        # Step 5: Extract last AI message text and apply output transformers
+        # Transformers always receive str; they may return str or list[dict] (custom blocks).
+        transformer_input = self._extract_message_content(langgraph_response)
+        logger.debug(f"LangGraph response: {str(transformer_input)[:100]}...")
 
         # Step 6: Apply output transformers
-        # Each transformer can modify the response (add footer, filter, etc.)
-        transformed_output = await self.output_transformers.apply(response_text, context)
+        # Each transformer can modify the response (add footer, filter content, etc.)
+        # or return a list of Slack block dicts for fully custom layouts.
+        transformed_output = await self.output_transformers.apply(transformer_input, context)
 
-        # Step 7: Convert markdown to Slack's format
-        slack_formatted = clean_markdown(transformed_output)
+        # Step 7: Branch on whether the transformer returned blocks or text
+        if isinstance(transformed_output, list):
+            fallback_text = self._extract_text_fallback(langgraph_response)
+            slack_formatted = clean_markdown(fallback_text)
 
-        # Step 8: Extract markdown images and create blocks
-        blocks = self._create_blocks(transformed_output, langgraph_thread)
+            if transformed_output and isinstance(transformed_output[0], list):
+                # Multi-message payload: list[list[dict]]
+                # Append feedback blocks to the last chunk only so they appear once
+                # at the end, not mixed into every sub-message.
+                from ..utils import create_feedback_block
+                feedback_blocks = create_feedback_block(
+                    thread_id=langgraph_thread,
+                    show_feedback_buttons=self.show_feedback_buttons,
+                    show_thread_id=self.show_thread_id,
+                )
+                messages = [list(chunk) for chunk in transformed_output]
+                messages[-1] = messages[-1] + feedback_blocks
+                logger.info(
+                    f"Output transformer returned {len(messages)}-message payload"
+                )
+                return slack_formatted, messages, langgraph_thread, run_id, True
 
-        return slack_formatted, blocks, langgraph_thread, run_id
+            # Single-message custom blocks — existing behaviour
+            blocks = self._create_blocks(fallback_text, langgraph_thread, custom_blocks=transformed_output)
+            logger.info(
+                f"Output transformer returned {len(transformed_output)} custom blocks"
+            )
+            return slack_formatted, blocks, langgraph_thread, run_id, True
+        else:
+            # Transformer returned a string — standard text + image extraction path.
+            slack_formatted = clean_markdown(transformed_output)
+            blocks = self._create_blocks(transformed_output, langgraph_thread)
+            return slack_formatted, blocks, langgraph_thread, run_id, False
 
     def _extract_tool_calls_from_messages(
         self, langgraph_response: dict

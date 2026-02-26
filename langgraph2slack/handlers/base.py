@@ -119,37 +119,89 @@ class BaseHandler:
         self,
         response_text: str,
         thread_id: str,
+        custom_blocks: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """Create Slack blocks for images and feedback.
 
-        Extracts markdown images from response (if enabled), limits them to max_image_blocks,
-        and adds feedback blocks.
+        When custom_blocks is provided (returned by a block-returning transform_output
+        transformer), skips image extraction and uses those blocks directly, appending
+        only the feedback/thread-id blocks.
+
+        When custom_blocks is None (default), extracts markdown images from response
+        (if enabled) and adds feedback blocks — existing behavior.
 
         Args:
-            response_text: Complete response text (may contain markdown images)
+            response_text: Complete response text (may contain markdown images).
+                           Used for image extraction when custom_blocks is None.
             thread_id: LangGraph thread ID for feedback tracking
+            custom_blocks: Pre-built Slack blocks from a transformer (optional).
+                           When provided, these replace the default image extraction.
 
         Returns:
-            List of Slack block dicts (image blocks + feedback blocks)
+            List of Slack block dicts
         """
-        # Extract markdown images from response if enabled
-        if self.extract_images:
-            image_blocks = extract_markdown_images(response_text, max_images=self.max_image_blocks)
-        else:
-            image_blocks = []
-
-        # Create feedback blocks
+        # Create feedback blocks (always appended regardless of custom_blocks)
         feedback_blocks = create_feedback_block(
             thread_id=thread_id,
             show_feedback_buttons=self.show_feedback_buttons,
             show_thread_id=self.show_thread_id,
         )
 
-        # Combine and return
-        blocks = image_blocks + feedback_blocks
-        logger.info(
-            f"Created {len(image_blocks)} image blocks and "
-            f"{len(feedback_blocks)} feedback blocks"
-        )
+        if custom_blocks is not None:
+            # Use transformer-provided blocks; skip image extraction.
+            # Note: extract_images is intentionally bypassed here — custom blocks
+            # fully control the layout. See transform_output docstring.
+            blocks = custom_blocks + feedback_blocks
+            if self.extract_images:
+                logger.debug(
+                    "extract_images is enabled but bypassed because transformer "
+                    "returned custom blocks"
+                )
+            logger.info(
+                f"Using {len(custom_blocks)} custom blocks from transformer and "
+                f"{len(feedback_blocks)} feedback blocks"
+            )
+        else:
+            # Default path: extract markdown images from response if enabled
+            if self.extract_images:
+                image_blocks = extract_markdown_images(
+                    response_text, max_images=self.max_image_blocks
+                )
+            else:
+                image_blocks = []
+
+            blocks = image_blocks + feedback_blocks
+            logger.info(
+                f"Created {len(image_blocks)} image blocks and "
+                f"{len(feedback_blocks)} feedback blocks"
+            )
 
         return blocks
+
+    def _extract_text_fallback(self, run_output: Dict) -> str:
+        """Extract last message content as a plain text fallback.
+
+        Used when a transformer returns custom blocks — we still need a short
+        text string for Slack's notification preview (the ``text=`` parameter
+        in chat_update / say).
+
+        Args:
+            run_output: Full LangGraph state dict from runs.join()
+
+        Returns:
+            Last AI message content as a string, or empty string if unavailable.
+        """
+        try:
+            messages = run_output.get("messages", [])
+            if not messages:
+                return ""
+            content = messages[-1].get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+                )
+            return str(content)
+        except Exception:
+            return ""

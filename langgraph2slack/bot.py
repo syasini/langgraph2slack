@@ -32,6 +32,34 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
+    """Return a cleaned copy of blocks suitable for a retry after a known Slack API error.
+
+    - ``only_one_table_allowed``: keeps only the first ``table`` block, drops the rest.
+    - ``downloading image`` / generic ``invalid_blocks``: strips all ``image`` blocks.
+
+    Returns the blocks unchanged if they appear to be a multi-message payload
+    (list[list[dict]]) — that case is handled upstream by the ``is_multi_message`` path.
+    """
+    # Guard: multi-message payloads (list[list[dict]]) cannot be cleaned this way
+    if blocks and isinstance(blocks[0], list):
+        return blocks
+    if "only_one_table_allowed" in error_str:
+        cleaned = []
+        seen_table = False
+        for b in blocks:
+            if b.get("type") == "table":
+                if not seen_table:
+                    cleaned.append(b)
+                    seen_table = True
+                # extra table blocks silently dropped; their text is already in surrounding sections
+            else:
+                cleaned.append(b)
+        return cleaned
+    # Default: strip image blocks (e.g. image download failure)
+    return [b for b in blocks if b.get("type") != "image"]
+
+
 class SlackBot:
     """Main bot class for LangGraph-Slack integration.
 
@@ -321,16 +349,33 @@ class SlackBot:
     def transform_output(self, func: Callable) -> Callable:
         """Decorator to add an output transformer.
 
-        Output transformers modify LangGraph responses before sending to Slack.
-        Multiple transformers are applied in registration order.
+        Output transformers receive the LangGraph response text (str) and may return
+        either a modified string or a list of Slack block dicts for fully custom layouts.
+        Multiple transformers are applied in registration order. When a transformer returns
+        blocks, the chain short-circuits and remaining transformers are skipped. Blocks fully
+        control the final message layout (no text section is auto-prepended by the bot).
 
-        Example:
+        Note:
+            When a transformer returns blocks, the ``extract_images`` setting is bypassed —
+            the custom blocks fully replace the default image-extraction behavior. If your
+            transformer conditionally returns blocks or str, images will only be extracted
+            in the str path.
+
+        Examples:
+            # Text transformer — modifies the response string
             @bot.transform_output
             async def add_footer(response: str, context: MessageContext) -> str:
                 return f"{response}\\n\\n_Powered by AI_"
 
+            # Block transformer — replaces text with custom Slack blocks
+            @bot.transform_output
+            async def render_table(response: str) -> list[dict]:
+                if "|---" in response:
+                    return [{"type": "section", "text": {"type": "mrkdwn", "text": response}}]
+                return response  # pass through when no table
+
         Args:
-            func: Async function (str, MessageContext) -> str
+            func: Async function (str[, MessageContext]) -> str | list[dict]
 
         Returns:
             The function (for decorator usage)
@@ -625,6 +670,35 @@ class SlackBot:
 
         return app
 
+    def _prepare_send_blocks(
+        self,
+        blocks: list,
+        response_text: str,
+        has_custom_blocks: bool,
+    ) -> list:
+        """Prepend a text section to standard block layouts.
+
+        When a transformer returned custom blocks they already encode the full
+        layout, so nothing is added. For the default image/feedback layout we
+        prepend the response text as a mrkdwn section so the text remains
+        visible alongside the blocks.
+
+        Args:
+            blocks: Block list returned by the handler.
+            response_text: Formatted response text (used only for standard layout).
+            has_custom_blocks: True when blocks came from a transformer.
+
+        Returns:
+            Final block list ready to send to Slack.
+        """
+        if blocks and not has_custom_blocks:
+            text_block = {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": response_text},
+            }
+            return [text_block] + blocks
+        return blocks
+
     async def _build_metadata(self, context: MessageContext) -> dict:
         """Build metadata dict from Slack context.
 
@@ -764,30 +838,58 @@ class SlackBot:
                                 )
 
                     logger.info("Non-streaming mode: calling handler.process_message")
-                    response_text, blocks, thread_id, run_id = await self.handler.process_message(
+                    response_text, blocks, thread_id, run_id, has_custom_blocks = await self.handler.process_message(
                         message_text, context
                     )
                     logger.info(
-                        f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}"
+                        f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}, has_custom_blocks={has_custom_blocks}"
                     )
 
                     logger.info(
                         f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks"
                     )
 
-                    # If we have blocks, prepend a text section block with the response
-                    if blocks:
-                        # Create a text section block for the response
-                        text_block = {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": response_text},
-                        }
-                        # Prepend text block to the beginning
-                        blocks = [text_block] + blocks
-                        logger.info(f"Added text block, total blocks: {len(blocks)}")
+                    # Detect multi-message response: transformer returned list[list[dict]]
+                    is_multi_message = (
+                        has_custom_blocks
+                        and bool(blocks)
+                        and isinstance(blocks[0], list)
+                    )
+
+                    if is_multi_message:
+                        first_blocks, *rest_blocks = blocks
+                        # Send/update first chunk
+                        if placeholder_ts:
+                            await self.slack_app.client.chat_update(
+                                channel=context.channel_id,
+                                ts=placeholder_ts,
+                                text=response_text,
+                                blocks=first_blocks,
+                            )
+                            result = {"ts": placeholder_ts}
+                        else:
+                            result = await say(
+                                text=response_text,
+                                thread_ts=thread_ts,
+                                blocks=first_blocks,
+                            )
+                        # Send remaining chunks as follow-up messages in the same thread
+                        reply_thread = thread_ts or (result.get("ts") if result else None)
+                        for chunk_blocks in rest_blocks:
+                            await say(
+                                text=" ",
+                                thread_ts=reply_thread,
+                                blocks=chunk_blocks,
+                            )
+                        logger.info(f"Multi-message: sent {1 + len(rest_blocks)} messages")
+                    else:
+                        blocks = self._prepare_send_blocks(blocks, response_text, has_custom_blocks)
+                        logger.info(f"Prepared blocks for send: {len(blocks)} total")
 
                     # Update placeholder or send new message
-                    if placeholder_ts:
+                    if is_multi_message:
+                        pass  # already handled above
+                    elif placeholder_ts:
                         # Update the placeholder message
                         logger.info(f"Updating placeholder message {placeholder_ts}")
                         try:
@@ -799,27 +901,25 @@ class SlackBot:
                             )
                             result = {"ts": placeholder_ts}
                         except Exception as e:
-                            # If error mentions invalid_blocks or downloading image, retry without image blocks
+                            # Retry with a cleaned block list for known recoverable errors
                             error_str = str(e)
                             if "invalid_blocks" in error_str or "downloading image" in error_str:
+                                cleaned = _clean_blocks_for_retry(blocks, error_str)
                                 logger.warning(
-                                    f"Image blocks failed ({error_str}), retrying without images"
+                                    f"Block update failed ({error_str}), retrying with cleaned blocks"
                                 )
-                                blocks_without_images = [
-                                    b for b in blocks if b.get("type") != "image"
-                                ]
                                 await self.slack_app.client.chat_update(
                                     channel=context.channel_id,
                                     ts=placeholder_ts,
                                     text=response_text,
-                                    blocks=blocks_without_images if blocks_without_images else None,
+                                    blocks=cleaned if cleaned else None,
                                 )
                                 result = {"ts": placeholder_ts}
                             else:
                                 raise
                     else:
                         # Send message with blocks (or just text if no blocks)
-                        # Try sending with blocks first, fallback to text-only if image download fails
+                        # Try sending with blocks first, fallback if Slack rejects them
                         try:
                             result = await say(
                                 text=response_text,  # Fallback text for notifications
@@ -830,23 +930,20 @@ class SlackBot:
                                 f"Message sent successfully, result ts={result.get('ts') if result else 'None'}"
                             )
                         except Exception as e:
-                            # If error mentions invalid_blocks or downloading image, retry without image blocks
+                            # Retry with a cleaned block list for known recoverable errors
                             error_str = str(e)
                             if "invalid_blocks" in error_str or "downloading image" in error_str:
+                                cleaned = _clean_blocks_for_retry(blocks, error_str)
                                 logger.warning(
-                                    f"Image blocks failed ({error_str}), retrying without images"
+                                    f"Block send failed ({error_str}), retrying with cleaned blocks"
                                 )
-                                # Keep text block and feedback block, remove image blocks
-                                blocks_without_images = [
-                                    b for b in blocks if b.get("type") != "image"
-                                ]
                                 result = await say(
                                     text=response_text,
                                     thread_ts=thread_ts,
-                                    blocks=blocks_without_images if blocks_without_images else None,
+                                    blocks=cleaned if cleaned else None,
                                 )
                                 logger.info(
-                                    f"Message sent without images, result ts={result.get('ts') if result else 'None'}"
+                                    f"Message sent with cleaned blocks, result ts={result.get('ts') if result else 'None'}"
                                 )
                             else:
                                 # Some other error, re-raise it
@@ -868,7 +965,7 @@ class SlackBot:
                     # Add user-complete reactions (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
                     if user_complete_reactions:
-                        await self._add_reactions_parallel(
+                        await self._reactions.add_parallel(
                             user_complete_reactions, context.channel_id, context.message_ts
                         )
 
