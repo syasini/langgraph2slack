@@ -93,6 +93,11 @@ class MessageHandler(BaseHandler):
 
         Main entry point for non-streaming message processing.
 
+        Unlike ``StreamingHandler.process_message()`` which manages the full Slack
+        lifecycle internally, this handler returns the composed text and blocks for
+        the caller (``SlackBot``) to send via ``say()`` or ``chat_update()``. The
+        caller uses ``has_custom_blocks`` to decide whether to prepend a text section.
+
         Args:
             message: Raw message text from Slack
             context: Message context with user/channel info

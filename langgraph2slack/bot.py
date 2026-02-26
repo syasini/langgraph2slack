@@ -32,6 +32,28 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
+    """Return a cleaned copy of blocks suitable for a retry after a known Slack API error.
+
+    - ``only_one_table_allowed``: keeps only the first ``table`` block, drops the rest.
+    - ``downloading image`` / generic ``invalid_blocks``: strips all ``image`` blocks.
+    """
+    if "only_one_table_allowed" in error_str:
+        cleaned = []
+        seen_table = False
+        for b in blocks:
+            if b.get("type") == "table":
+                if not seen_table:
+                    cleaned.append(b)
+                    seen_table = True
+                # extra table blocks silently dropped; their text is already in surrounding sections
+            else:
+                cleaned.append(b)
+        return cleaned
+    # Default: strip image blocks (e.g. image download failure)
+    return [b for b in blocks if b.get("type") != "image"]
+
+
 class SlackBot:
     """Main bot class for LangGraph-Slack integration.
 
@@ -326,6 +348,12 @@ class SlackBot:
         Multiple transformers are applied in registration order. When a transformer returns
         blocks, the chain short-circuits and remaining transformers are skipped. Blocks fully
         control the final message layout (no text section is auto-prepended by the bot).
+
+        Note:
+            When a transformer returns blocks, the ``extract_images`` setting is bypassed —
+            the custom blocks fully replace the default image-extraction behavior. If your
+            transformer conditionally returns blocks or str, images will only be extracted
+            in the str path.
 
         Examples:
             # Text transformer — modifies the response string
@@ -831,27 +859,25 @@ class SlackBot:
                             )
                             result = {"ts": placeholder_ts}
                         except Exception as e:
-                            # If error mentions invalid_blocks or downloading image, retry without image blocks
+                            # Retry with a cleaned block list for known recoverable errors
                             error_str = str(e)
                             if "invalid_blocks" in error_str or "downloading image" in error_str:
+                                cleaned = _clean_blocks_for_retry(blocks, error_str)
                                 logger.warning(
-                                    f"Image blocks failed ({error_str}), retrying without images"
+                                    f"Block update failed ({error_str}), retrying with cleaned blocks"
                                 )
-                                blocks_without_images = [
-                                    b for b in blocks if b.get("type") != "image"
-                                ]
                                 await self.slack_app.client.chat_update(
                                     channel=context.channel_id,
                                     ts=placeholder_ts,
                                     text=response_text,
-                                    blocks=blocks_without_images if blocks_without_images else None,
+                                    blocks=cleaned if cleaned else None,
                                 )
                                 result = {"ts": placeholder_ts}
                             else:
                                 raise
                     else:
                         # Send message with blocks (or just text if no blocks)
-                        # Try sending with blocks first, fallback to text-only if image download fails
+                        # Try sending with blocks first, fallback if Slack rejects them
                         try:
                             result = await say(
                                 text=response_text,  # Fallback text for notifications
@@ -862,23 +888,20 @@ class SlackBot:
                                 f"Message sent successfully, result ts={result.get('ts') if result else 'None'}"
                             )
                         except Exception as e:
-                            # If error mentions invalid_blocks or downloading image, retry without image blocks
+                            # Retry with a cleaned block list for known recoverable errors
                             error_str = str(e)
                             if "invalid_blocks" in error_str or "downloading image" in error_str:
+                                cleaned = _clean_blocks_for_retry(blocks, error_str)
                                 logger.warning(
-                                    f"Image blocks failed ({error_str}), retrying without images"
+                                    f"Block send failed ({error_str}), retrying with cleaned blocks"
                                 )
-                                # Keep text block and feedback block, remove image blocks
-                                blocks_without_images = [
-                                    b for b in blocks if b.get("type") != "image"
-                                ]
                                 result = await say(
                                     text=response_text,
                                     thread_ts=thread_ts,
-                                    blocks=blocks_without_images if blocks_without_images else None,
+                                    blocks=cleaned if cleaned else None,
                                 )
                                 logger.info(
-                                    f"Message sent without images, result ts={result.get('ts') if result else 'None'}"
+                                    f"Message sent with cleaned blocks, result ts={result.get('ts') if result else 'None'}"
                                 )
                             else:
                                 # Some other error, re-raise it
@@ -900,7 +923,7 @@ class SlackBot:
                     # Add user-complete reactions (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
                     if user_complete_reactions:
-                        await self._add_reactions_parallel(
+                        await self._reactions.add_parallel(
                             user_complete_reactions, context.channel_id, context.message_ts
                         )
 

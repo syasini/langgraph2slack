@@ -18,6 +18,7 @@ Example:
 
 from .bot import SlackBot
 from .config import BotConfig, MessageContext
+from .block_transformers import render_blocks, render_tables, render_todo_lists, render_code_blocks
 
 # Version is dynamically loaded from package metadata (pyproject.toml)
 # Use `uv version --bump patch|minor|major` to update version
@@ -29,4 +30,12 @@ except PackageNotFoundError:
     # Fallback for development (package not installed)
     __version__ = "0.0.0.dev"
 
-__all__ = ["SlackBot", "BotConfig", "MessageContext"]
+__all__ = [
+    "SlackBot",
+    "BotConfig",
+    "MessageContext",
+    "render_blocks",
+    "render_tables",
+    "render_todo_lists",
+    "render_code_blocks",
+]

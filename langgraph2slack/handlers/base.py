@@ -148,8 +148,15 @@ class BaseHandler:
         )
 
         if custom_blocks is not None:
-            # Use transformer-provided blocks; skip image extraction
+            # Use transformer-provided blocks; skip image extraction.
+            # Note: extract_images is intentionally bypassed here — custom blocks
+            # fully control the layout. See transform_output docstring.
             blocks = custom_blocks + feedback_blocks
+            if self.extract_images:
+                logger.debug(
+                    "extract_images is enabled but bypassed because transformer "
+                    "returned custom blocks"
+                )
             logger.info(
                 f"Using {len(custom_blocks)} custom blocks from transformer and "
                 f"{len(feedback_blocks)} feedback blocks"

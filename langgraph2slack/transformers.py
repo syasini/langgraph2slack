@@ -5,9 +5,12 @@ sending to LangGraph.
 """
 
 import inspect
+import logging
 from typing import Any, Awaitable, Callable, Dict, List, Union
 
 from .config import MessageContext
+
+logger = logging.getLogger(__name__)
 
 # Type aliases for transformer input/output
 # Input: str (LangGraph response text)
@@ -104,6 +107,9 @@ class TransformerChain:
 
         # Apply each transformer in order
         for transformer in self._transformers:
+            previous = result
+            func_name = getattr(transformer, "__name__", repr(transformer))
+
             # Check if transformer accepts context parameter
             sig = inspect.signature(transformer)
             param_count = len(sig.parameters)
@@ -114,6 +120,19 @@ class TransformerChain:
             else:
                 # Transformer only accepts (message)
                 result = await transformer(result)
+
+            # Validate return type — catch common mistakes early
+            if result is None:
+                logger.warning(
+                    f"Transformer '{func_name}' returned None (missing return statement?), "
+                    f"keeping previous value"
+                )
+                result = previous
+            elif not isinstance(result, (str, list)):
+                raise TypeError(
+                    f"Transformer '{func_name}' returned {type(result).__name__}, "
+                    f"expected str or list[dict]"
+                )
 
             # If the transformer returned Slack blocks, stop the chain —
             # subsequent string transformers cannot process block lists.

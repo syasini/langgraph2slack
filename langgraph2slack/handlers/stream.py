@@ -154,6 +154,11 @@ class StreamingHandler(BaseHandler):
         Main entry point for streaming message processing.
         Sends response directly to Slack via streaming.
 
+        Unlike ``MessageHandler.process_message()`` which returns (text, blocks, ...)
+        for the caller to send, this handler manages the full Slack lifecycle internally
+        (start stream → append chunks → stop stream → update with blocks). It returns
+        only identifiers needed for feedback tracking.
+
         Args:
             message: Raw message text from Slack
             context: Message context with user/channel info
@@ -803,6 +808,59 @@ class StreamingHandler(BaseHandler):
             # Log but don't raise - we want to continue streaming
             logger.warning(f"Failed to append to stream: {e}")
 
+    async def _update_message_with_fallback(
+        self,
+        channel_id: str,
+        stream_ts: str,
+        primary_blocks: list,
+        fallback_text: str,
+        thread_id: str = None,
+    ) -> None:
+        """Try chat_update with primary blocks; on failure, degrade to text + feedback only.
+
+        This centralizes the two-level fallback pattern used by both the custom-blocks
+        and default paths in ``_stop_slack_stream()``.
+
+        Args:
+            channel_id: Slack channel ID
+            stream_ts: Message timestamp to update
+            primary_blocks: Blocks to attempt first (custom blocks or text + images + feedback)
+            fallback_text: Notification/fallback text (mrkdwn-formatted)
+            thread_id: LangGraph thread ID for feedback footer
+        """
+        try:
+            await self.slack_client.client.chat_update(
+                channel=channel_id,
+                ts=stream_ts,
+                text=fallback_text,
+                blocks=primary_blocks,
+            )
+            logger.info(f"Updated message with {len(primary_blocks)} blocks")
+        except Exception as block_error:
+            logger.warning(f"Failed to update with primary blocks: {block_error}")
+            logger.debug("Retrying with text + feedback blocks only")
+
+            from ..utils import create_feedback_block
+
+            feedback_only_blocks = create_feedback_block(
+                thread_id=thread_id,
+                show_feedback_buttons=self.show_feedback_buttons,
+                show_thread_id=self.show_thread_id,
+            )
+            text_block = {"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}
+            fallback_blocks = [text_block] + feedback_only_blocks
+
+            try:
+                await self.slack_client.client.chat_update(
+                    channel=channel_id,
+                    ts=stream_ts,
+                    text=fallback_text,
+                    blocks=fallback_blocks,
+                )
+                logger.info("Fallback succeeded: sent text + feedback blocks only")
+            except Exception as fallback_error:
+                logger.error(f"Failed even with fallback blocks: {fallback_error}")
+
     async def _stop_slack_stream(
         self,
         channel_id: str,
@@ -845,6 +903,13 @@ class StreamingHandler(BaseHandler):
                 display_text = complete_response
 
         try:
+            # Stop the stream first (blocks not supported in chat_stopStream for threads)
+            await self.slack_client.client.chat_stopStream(
+                channel=channel_id,
+                ts=stream_ts,
+            )
+            logger.debug("Stream stopped")
+
             if custom_blocks is not None:
                 # ---------------------------------------------------------------
                 # Custom blocks path: transformer returned list[dict]
@@ -854,53 +919,12 @@ class StreamingHandler(BaseHandler):
                     complete_response, thread_id, custom_blocks=custom_blocks
                 )
 
-                # Stop the stream without blocks
-                await self.slack_client.client.chat_stopStream(
-                    channel=channel_id,
-                    ts=stream_ts,
-                )
-                logger.debug("Stream stopped (custom blocks path)")
-
                 if blocks:
                     await asyncio.sleep(0.5)
-                    # Use accumulated text as notification fallback
                     fallback_text = clean_markdown(complete_response, for_blocks=True) or " "
-                    try:
-                        await self.slack_client.client.chat_update(
-                            channel=channel_id,
-                            ts=stream_ts,
-                            text=fallback_text,
-                            blocks=blocks,
-                        )
-                        logger.info(
-                            f"Replaced streamed text with {len(custom_blocks)} custom blocks"
-                            f" + {len(blocks) - len(custom_blocks)} feedback blocks"
-                        )
-                    except Exception as block_error:
-                        logger.warning(f"Failed to update with custom blocks: {block_error}")
-                        logger.debug("Retrying with text + feedback blocks (degraded custom blocks)")
-
-                        from ..utils import create_feedback_block
-
-                        feedback_only_blocks = create_feedback_block(
-                            thread_id=thread_id,
-                            show_feedback_buttons=self.show_feedback_buttons,
-                            show_thread_id=self.show_thread_id,
-                        )
-                        slack_text = clean_markdown(complete_response, for_blocks=True) or " "
-                        text_block = {"type": "section", "text": {"type": "mrkdwn", "text": slack_text}}
-                        fallback_blocks = [text_block] + feedback_only_blocks
-
-                        try:
-                            await self.slack_client.client.chat_update(
-                                channel=channel_id,
-                                ts=stream_ts,
-                                text=fallback_text,
-                                blocks=fallback_blocks,
-                            )
-                            logger.info("Custom blocks failed; sent text + feedback blocks as fallback")
-                        except Exception as fallback_error:
-                            logger.error(f"Failed even with fallback blocks: {fallback_error}")
+                    await self._update_message_with_fallback(
+                        channel_id, stream_ts, blocks, fallback_text, thread_id
+                    )
 
             else:
                 # ---------------------------------------------------------------
@@ -908,71 +932,20 @@ class StreamingHandler(BaseHandler):
                 # ---------------------------------------------------------------
                 blocks = self._create_blocks(display_text, thread_id)
 
-                # Stop the stream without blocks
-                await self.slack_client.client.chat_stopStream(
-                    channel=channel_id,
-                    ts=stream_ts,
-                )
-
-                logger.debug("Stream stopped")
-
-                # If we have blocks to add, update the message
                 if blocks:
-                    # Small delay to ensure Slack has processed the stream stop
                     await asyncio.sleep(0.5)
 
-                    # Remove image markdown from text (since we're showing them as image blocks)
+                    # Remove image markdown from text (shown as image blocks instead)
                     text_without_images = remove_markdown_images(display_text)
-
-                    # Convert to Slack block format (for_blocks=True converts **bold** -> *bold*, etc.)
                     slack_text = clean_markdown(text_without_images, for_blocks=True)
 
-                    # Create a text section block to preserve the streamed content
+                    # Prepend text block to preserve streamed content alongside images + feedback
                     text_block = {"type": "section", "text": {"type": "mrkdwn", "text": slack_text}}
-
-                    # Prepend text block to preserve streamed content, then add images + feedback
                     all_blocks = [text_block] + blocks
 
-                    try:
-                        # Update the message with text + blocks (images + feedback)
-                        await self.slack_client.client.chat_update(
-                            channel=channel_id,
-                            ts=stream_ts,
-                            text=slack_text,  # Fallback text for notifications
-                            blocks=all_blocks,
-                        )
-
-                        logger.info(f"Added {len(all_blocks)} blocks to message")
-
-                    except Exception as block_error:
-                        # If updating with blocks fails (e.g., image download issues),
-                        # fall back to just feedback blocks without images
-                        logger.warning(f"Failed to add blocks: {block_error}")
-                        logger.debug("Retrying with feedback blocks only (no images)")
-
-                        # Get only feedback blocks (no image blocks)
-                        from ..utils import create_feedback_block
-
-                        feedback_only_blocks = create_feedback_block(
-                            thread_id=thread_id,
-                            show_feedback_buttons=self.show_feedback_buttons,
-                            show_thread_id=self.show_thread_id,
-                        )
-
-                        # Add text block back
-                        fallback_blocks = [text_block] + feedback_only_blocks
-
-                        # Try again with just text + feedback
-                        try:
-                            await self.slack_client.client.chat_update(
-                                channel=channel_id,
-                                ts=stream_ts,
-                                text=slack_text,
-                                blocks=fallback_blocks,
-                            )
-                            logger.info("Added feedback blocks only")
-                        except Exception as fallback_error:
-                            logger.error(f"Failed even with feedback-only blocks: {fallback_error}")
+                    await self._update_message_with_fallback(
+                        channel_id, stream_ts, all_blocks, slack_text, thread_id
+                    )
 
         except Exception as e:
             logger.error(f"Failed to stop stream: {e}", exc_info=True)
