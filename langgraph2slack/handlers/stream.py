@@ -54,7 +54,6 @@ class StreamingHandler(BaseHandler):
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         tool_call_store: Optional[dict] = None,
-        structured_output: bool = False,
     ):
         """Initialize streaming handler.
 
@@ -78,10 +77,6 @@ class StreamingHandler(BaseHandler):
             show_tool_calls: Show live plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output + View Details button (default: True)
             tool_call_store: Shared dict (from SlackBot) mapping plan_ts -> list[ActiveToolCall]
-            structured_output: When True, also stream "values" events from LangGraph to capture
-                               the full final state dict and pass it to output transformers instead
-                               of the accumulated text response. Use this when your graph has custom
-                               state keys (e.g. image_url, table) beyond the last AI message.
         """
         # Initialize base class
         super().__init__(
@@ -95,7 +90,6 @@ class StreamingHandler(BaseHandler):
             show_tool_calls=show_tool_calls,
             show_tool_call_details=show_tool_call_details,
             tool_call_store=tool_call_store,
-            structured_output=structured_output,
         )
         # Store handler-specific attributes
         self.langgraph_client = langgraph_client
@@ -470,14 +464,14 @@ class StreamingHandler(BaseHandler):
             context: Message context for output transforms
 
         Returns:
-            Tuple of (complete_response, run_id)
+            Tuple of (transformed, complete_response, run_id)
+            - transformed: Transformer output — str (possibly modified text) or list[dict] (custom blocks)
+            - complete_response: Raw accumulated text from the stream (used as fallback)
+            - run_id: LangGraph run ID, or None if not captured
         """
         complete_response = ""
         chunk_count = 0
         run_id = None
-
-        # Final state snapshot captured from "values" events (only used when structured_output=True)
-        final_state: Optional[dict] = None
 
         # Tool call tracking (only active when show_tool_calls=True)
         tracker = ToolCallTracker() if self.show_tool_calls else None
@@ -494,10 +488,6 @@ class StreamingHandler(BaseHandler):
         # Build metadata if builder is provided
         metadata = await self.metadata_builder(context) if self.metadata_builder else {}
 
-        # When structured_output=True, also request "values" events so we can capture
-        # the full LangGraph state dict (including custom keys like image_url, table).
-        stream_mode = ["messages-tuple", "values"] if self.structured_output else ["messages-tuple"]
-
         try:
             # Start streaming from LangGraph
             # stream_mode="messages-tuple" gives us incremental message updates as tuples
@@ -505,7 +495,7 @@ class StreamingHandler(BaseHandler):
                 thread_id=langgraph_thread,
                 assistant_id=self.assistant_id,
                 input={"messages": [{"role": "user", "content": message}]},
-                stream_mode=stream_mode,
+                stream_mode=["messages-tuple"],
                 multitask_strategy="interrupt",
                 if_not_exists="create",
                 metadata=metadata,
@@ -523,16 +513,6 @@ class StreamingHandler(BaseHandler):
                     ):
                         run_id = chunk.data["run_id"]
                         logger.info(f"Captured run_id: {run_id}")
-
-                # Capture the latest full state snapshot (fires at each graph node).
-                # We overwrite on every values event so final_state holds the last one.
-                if chunk.event == "values" and self.structured_output:
-                    if isinstance(chunk.data, dict):
-                        final_state = chunk.data
-                        logger.debug(
-                            f"Captured values snapshot with keys: {list(final_state.keys())}"
-                        )
-                    continue
 
                 # Only process message chunks (skip metadata/other events)
                 if chunk.event != "messages":
@@ -743,19 +723,10 @@ class StreamingHandler(BaseHandler):
             except:
                 pass  # Best effort
 
-        # Apply output transformers to complete response (or full state if structured_output=True).
+        # Apply output transformers to the accumulated text response.
         # Note: We transform after streaming completes so transformers see the full context.
-        if self.structured_output and final_state is not None:
-            transformer_input = final_state
-            logger.debug(
-                f"structured_output=True: passing final state dict "
-                f"(keys={list(final_state.keys())}) to output transformers"
-            )
-        else:
-            transformer_input = complete_response
-
-        if transformer_input:
-            transformed = await self.output_transformers.apply(transformer_input, context)
+        if complete_response:
+            transformed = await self.output_transformers.apply(complete_response, context)
         else:
             transformed = complete_response  # empty string passthrough
 

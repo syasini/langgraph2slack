@@ -10,9 +10,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Union
 from .config import MessageContext
 
 # Type aliases for transformer input/output
-# Input: str (text response) or dict (full LangGraph state when structured_output=True)
+# Input: str (LangGraph response text)
 # Output: str (transformed text) or list[dict] (custom Slack blocks)
-TransformerInput = Union[str, Dict[str, Any]]
+TransformerInput = str
 TransformerOutput = Union[str, List[Dict[str, Any]]]
 
 # Type alias for transformer functions
@@ -86,7 +86,7 @@ class TransformerChain:
         further processed as strings.
 
         Args:
-            message: Input message (str) or full LangGraph state dict
+            message: Input message (LangGraph response text)
             context: Message context
 
         Returns:

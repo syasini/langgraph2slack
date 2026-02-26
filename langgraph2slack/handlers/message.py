@@ -46,7 +46,6 @@ class MessageHandler(BaseHandler):
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         tool_call_store: Optional[Dict] = None,
-        structured_output: bool = False,
     ):
         """Initialize message handler.
 
@@ -65,7 +64,6 @@ class MessageHandler(BaseHandler):
             show_tool_calls: Show plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output + View Details button (default: True)
             tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall]
-            structured_output: Pass full LangGraph state dict to output transformers (default: False)
         """
         # Initialize base class
         super().__init__(
@@ -79,7 +77,6 @@ class MessageHandler(BaseHandler):
             show_tool_calls=show_tool_calls,
             show_tool_call_details=show_tool_call_details,
             tool_call_store=tool_call_store,
-            structured_output=structured_output,
         )
         # Store handler-specific attributes
         self.client = langgraph_client
@@ -91,7 +88,7 @@ class MessageHandler(BaseHandler):
         self,
         message: str,
         context: MessageContext,
-    ) -> Tuple[str, List[Dict], Optional[str], Optional[str]]:
+    ) -> Tuple[str, List[Dict], Optional[str], Optional[str], bool]:
         """Process a message through the full pipeline.
 
         Main entry point for non-streaming message processing.
@@ -101,11 +98,12 @@ class MessageHandler(BaseHandler):
             context: Message context with user/channel info
 
         Returns:
-            Tuple of (formatted_text, blocks, thread_id, run_id)
-            - formatted_text: Processed response ready to send to Slack
-            - blocks: List of Slack blocks (images + feedback)
+            Tuple of (formatted_text, blocks, thread_id, run_id, has_custom_blocks)
+            - formatted_text: Processed response ready to send to Slack (or notification fallback)
+            - blocks: List of Slack blocks (custom layout or image/feedback blocks)
             - thread_id: LangGraph thread ID
             - run_id: LangGraph run ID for feedback
+            - has_custom_blocks: True when blocks came from a transformer (caller should NOT prepend text section)
         """
         logger.info(
             f"Processing message from user {context.user_id} in channel {context.channel_id}"
@@ -136,16 +134,10 @@ class MessageHandler(BaseHandler):
                 langgraph_response, context.channel_id, slack_thread_ts, run_id
             )
 
-        # Step 5: Choose transformer input based on structured_output flag
-        if self.structured_output:
-            # Pass the full LangGraph state dict so transformers can access
-            # custom state keys (e.g. image_url, table) beyond the last message.
-            transformer_input = langgraph_response
-            logger.debug("structured_output=True: passing full state dict to output transformers")
-        else:
-            # Default: extract last AI message text (existing behaviour)
-            transformer_input = self._extract_message_content(langgraph_response)
-            logger.debug(f"LangGraph response: {str(transformer_input)[:100]}...")
+        # Step 5: Extract last AI message text and apply output transformers
+        # Transformers always receive str; they may return str or list[dict] (custom blocks).
+        transformer_input = self._extract_message_content(langgraph_response)
+        logger.debug(f"LangGraph response: {str(transformer_input)[:100]}...")
 
         # Step 6: Apply output transformers
         # Each transformer can modify the response (add footer, filter content, etc.)
@@ -162,12 +154,12 @@ class MessageHandler(BaseHandler):
             logger.info(
                 f"Output transformer returned {len(transformed_output)} custom blocks"
             )
+            return slack_formatted, blocks, langgraph_thread, run_id, True
         else:
             # Transformer returned a string — standard text + image extraction path.
             slack_formatted = clean_markdown(transformed_output)
             blocks = self._create_blocks(transformed_output, langgraph_thread)
-
-        return slack_formatted, blocks, langgraph_thread, run_id
+            return slack_formatted, blocks, langgraph_thread, run_id, False
 
     def _extract_tool_calls_from_messages(
         self, langgraph_response: dict

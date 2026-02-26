@@ -34,7 +34,6 @@ class BaseHandler:
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         tool_call_store: Optional[Dict] = None,
-        structured_output: bool = False,
     ):
         """Initialize base handler.
 
@@ -50,10 +49,6 @@ class BaseHandler:
             show_tool_call_details: Show truncated input/output preview + View Details button (default: True)
             tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall] for the
                              "View Full Details" modal. Passed by reference from SlackBot.
-            structured_output: When True, pass the full LangGraph state dict to output
-                               transformers instead of extracting only the last message text.
-                               Use this when your graph has custom state keys (e.g. image_url,
-                               table) that you want to access in a transform_output transformer.
         """
         self.assistant_id = assistant_id
         self.input_transformers = input_transformers
@@ -64,7 +59,6 @@ class BaseHandler:
         self.max_image_blocks = max_image_blocks
         self.show_tool_calls = show_tool_calls
         self.show_tool_call_details = show_tool_call_details
-        self.structured_output = structured_output
         # Shared store: plan_ts -> list[ActiveToolCall]; same dict reference across bot + handlers
         self.tool_call_store: Dict = tool_call_store if tool_call_store is not None else {}
 

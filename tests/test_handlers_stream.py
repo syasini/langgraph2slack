@@ -275,7 +275,7 @@ class TestStreamFromLangGraphToSlack:
     @pytest.mark.asyncio
     async def test_stream_basic_three_chunks(self, basic_streaming_handler, sample_context):
         """Should stream 3 chunks and accumulate them correctly."""
-        complete_response, run_id = await basic_streaming_handler._stream_from_langgraph_to_slack(
+        transformed, complete_response, run_id = await basic_streaming_handler._stream_from_langgraph_to_slack(
             message="Test message",
             langgraph_thread="thread-123",
             slack_channel="C456CHANNEL",
@@ -328,7 +328,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        _, run_id = await handler._stream_from_langgraph_to_slack(
+        _, _, run_id = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -372,7 +372,7 @@ class TestStreamFromLangGraphToSlack:
             message_types=["AIMessageChunk"]  # Only process AIMessageChunk
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -415,7 +415,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -458,7 +458,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -504,7 +504,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -535,7 +535,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=output_chain,
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        transformed, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -543,9 +543,9 @@ class TestStreamFromLangGraphToSlack:
             context=sample_context
         )
 
-        # Output transformer should be applied
-        assert "Hello world!" in complete_response
-        assert "_Powered by AI_" in complete_response
+        # Output transformer should be applied to the transformed output
+        assert "Hello world!" in complete_response  # raw accumulated text
+        assert "_Powered by AI_" in transformed  # transformer appended footer
 
     @pytest.mark.asyncio
     async def test_stream_handles_streaming_error(self, mock_langgraph_client, mock_slack_client, sample_context):
@@ -569,7 +569,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
@@ -637,7 +637,7 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        complete_response, run_id = await handler._stream_from_langgraph_to_slack(
+        transformed, complete_response, run_id = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",

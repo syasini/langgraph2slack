@@ -70,7 +70,6 @@ class SlackBot:
         stream_buffer_max_chunks: int = 10,
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
-        structured_output: bool = False,
     ):
         """Initialize SlackBot.
 
@@ -135,20 +134,6 @@ class SlackBot:
                 in each task card and add a "View Full Details" button (default: True).
                 Clicking the button opens a modal with full untruncated content (SQL, JSON, etc.).
                 Set to False to show only tool name + status.
-            structured_output: Pass the full LangGraph state dict to output transformers (default: False).
-                When True, @bot.transform_output receives the complete runs.join() state dict instead of
-                just the last AI message text. Use this when your graph has custom state keys
-                (e.g. image_url, table) that you want to access in a block-building transformer.
-                In streaming mode, also captures "values" events to get the final state after all
-                nodes have run. Example usage:
-                    bot = SlackBot(structured_output=True)
-
-                    @bot.transform_output
-                    async def build_blocks(state: dict) -> list[dict]:
-                        return [
-                            {"type": "section", "text": {"type": "mrkdwn", "text": state["summary"]}},
-                            {"type": "image", "image_url": state["chart_url"], "alt_text": "chart"},
-                        ]
         """
         logger.info("Initializing SlackBot...")
 
@@ -175,7 +160,6 @@ class SlackBot:
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
         self.show_tool_calls = show_tool_calls
         self.show_tool_call_details = show_tool_call_details
-        self.structured_output = structured_output
 
         # Shared store for tool call data used by the "View Full Details" modal.
         # Maps plan_ts (Slack message timestamp) -> list[ActiveToolCall].
@@ -231,7 +215,6 @@ class SlackBot:
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
                 tool_call_store=self.tool_call_store,
-                structured_output=self.structured_output,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:
@@ -250,7 +233,6 @@ class SlackBot:
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
                 tool_call_store=self.tool_call_store,
-                structured_output=self.structured_output,
             )
             logger.info("Using MessageHandler (non-streaming)")
 
@@ -339,16 +321,27 @@ class SlackBot:
     def transform_output(self, func: Callable) -> Callable:
         """Decorator to add an output transformer.
 
-        Output transformers modify LangGraph responses before sending to Slack.
-        Multiple transformers are applied in registration order.
+        Output transformers receive the LangGraph response text (str) and may return
+        either a modified string or a list of Slack block dicts for fully custom layouts.
+        Multiple transformers are applied in registration order. When a transformer returns
+        blocks, the chain short-circuits and remaining transformers are skipped. Blocks fully
+        control the final message layout (no text section is auto-prepended by the bot).
 
-        Example:
+        Examples:
+            # Text transformer — modifies the response string
             @bot.transform_output
             async def add_footer(response: str, context: MessageContext) -> str:
                 return f"{response}\\n\\n_Powered by AI_"
 
+            # Block transformer — replaces text with custom Slack blocks
+            @bot.transform_output
+            async def render_table(response: str) -> list[dict]:
+                if "|---" in response:
+                    return [{"type": "section", "text": {"type": "mrkdwn", "text": response}}]
+                return response  # pass through when no table
+
         Args:
-            func: Async function (str, MessageContext) -> str
+            func: Async function (str[, MessageContext]) -> str | list[dict]
 
         Returns:
             The function (for decorator usage)
@@ -782,25 +775,24 @@ class SlackBot:
                                 )
 
                     logger.info("Non-streaming mode: calling handler.process_message")
-                    response_text, blocks, thread_id, run_id = await self.handler.process_message(
+                    response_text, blocks, thread_id, run_id, has_custom_blocks = await self.handler.process_message(
                         message_text, context
                     )
                     logger.info(
-                        f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}"
+                        f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}, has_custom_blocks={has_custom_blocks}"
                     )
 
                     logger.info(
                         f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks"
                     )
 
-                    # If we have blocks, prepend a text section block with the response
-                    if blocks:
-                        # Create a text section block for the response
+                    # Prepend a text section only when blocks are image/feedback blocks.
+                    # When a transformer returned custom blocks, those ARE the layout — don't add extra text.
+                    if blocks and not has_custom_blocks:
                         text_block = {
                             "type": "section",
                             "text": {"type": "mrkdwn", "text": response_text},
                         }
-                        # Prepend text block to the beginning
                         blocks = [text_block] + blocks
                         logger.info(f"Added text block, total blocks: {len(blocks)}")
 
