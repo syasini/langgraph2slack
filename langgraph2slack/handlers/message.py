@@ -151,10 +151,27 @@ class MessageHandler(BaseHandler):
 
         # Step 7: Branch on whether the transformer returned blocks or text
         if isinstance(transformed_output, list):
-            # Transformer returned custom Slack blocks — use them directly.
-            # Extract text from last message for Slack's notification preview.
             fallback_text = self._extract_text_fallback(langgraph_response)
             slack_formatted = clean_markdown(fallback_text)
+
+            if transformed_output and isinstance(transformed_output[0], list):
+                # Multi-message payload: list[list[dict]]
+                # Append feedback blocks to the last chunk only so they appear once
+                # at the end, not mixed into every sub-message.
+                from ..utils import create_feedback_block
+                feedback_blocks = create_feedback_block(
+                    thread_id=langgraph_thread,
+                    show_feedback_buttons=self.show_feedback_buttons,
+                    show_thread_id=self.show_thread_id,
+                )
+                messages = [list(chunk) for chunk in transformed_output]
+                messages[-1] = messages[-1] + feedback_blocks
+                logger.info(
+                    f"Output transformer returned {len(messages)}-message payload"
+                )
+                return slack_formatted, messages, langgraph_thread, run_id, True
+
+            # Single-message custom blocks — existing behaviour
             blocks = self._create_blocks(fallback_text, langgraph_thread, custom_blocks=transformed_output)
             logger.info(
                 f"Output transformer returned {len(transformed_output)} custom blocks"

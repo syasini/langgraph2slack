@@ -233,6 +233,7 @@ class StreamingHandler(BaseHandler):
                 complete_response=complete_response,
                 transformed=transformed,
                 thread_id=langgraph_thread,
+                slack_thread_ts=slack_thread_ts,
             )
 
             # Add bot-complete reactions after streaming completes (parallel)
@@ -868,6 +869,7 @@ class StreamingHandler(BaseHandler):
         complete_response: str,
         transformed=None,
         thread_id: str = None,
+        slack_thread_ts: Optional[str] = None,
     ) -> None:
         """Stop Slack stream and add optional blocks (images, buttons).
 
@@ -878,6 +880,10 @@ class StreamingHandler(BaseHandler):
         blocks replace the default text-section + image blocks layout. The streamed text
         is replaced by the custom blocks via chat.update.
 
+        When ``transformed`` is a list of lists (multi-message payload), the streamed message
+        is updated with the first chunk and subsequent chunks are posted as separate messages
+        in the same thread.
+
         Note: Slack's chat.stopStream doesn't support blocks in threads, so we:
         1. Stop the stream without blocks
         2. Update the message with blocks using chat.update
@@ -887,14 +893,25 @@ class StreamingHandler(BaseHandler):
             stream_ts: Stream timestamp
             complete_response: Raw accumulated text response (used for image extraction
                                and as fallback text when transformed is blocks)
-            transformed: Transformer result — either a str (possibly modified text) or
-                         a list[dict] (custom Slack blocks). Defaults to complete_response.
+            transformed: Transformer result — either a str (possibly modified text),
+                         a list[dict] (custom Slack blocks), or a list[list[dict]]
+                         (multi-message payload). Defaults to complete_response.
             thread_id: Optional LangGraph thread ID to include in feedback footer
+            slack_thread_ts: Slack thread timestamp for posting follow-up messages
+                             in multi-message mode
         """
-        # Determine whether the transformer returned custom blocks or text
+        # Determine whether the transformer returned custom blocks, multi-message, or text
         if isinstance(transformed, list):
-            custom_blocks = transformed
+            if transformed and isinstance(transformed[0], list):
+                # Multi-message payload: list[list[dict]]
+                is_multi_message = True
+                custom_blocks = None
+            else:
+                # Single-message custom blocks: list[dict]
+                is_multi_message = False
+                custom_blocks = transformed
         else:
+            is_multi_message = False
             custom_blocks = None
             # If transformer returned a modified string, use that as the display text
             if isinstance(transformed, str) and transformed:
@@ -910,7 +927,45 @@ class StreamingHandler(BaseHandler):
             )
             logger.debug("Stream stopped")
 
-            if custom_blocks is not None:
+            if is_multi_message:
+                # ---------------------------------------------------------------
+                # Multi-message path: transformer returned list[list[dict]]
+                # Update stream message with first chunk; post the rest separately.
+                # ---------------------------------------------------------------
+                from ..utils import create_feedback_block
+
+                feedback_blocks = create_feedback_block(
+                    thread_id=thread_id,
+                    show_feedback_buttons=self.show_feedback_buttons,
+                    show_thread_id=self.show_thread_id,
+                )
+                messages = [list(chunk) for chunk in transformed]
+                messages[-1] = messages[-1] + feedback_blocks
+
+                fallback_text = clean_markdown(complete_response, for_blocks=True) or " "
+                first_blocks, *rest_blocks = messages
+
+                await asyncio.sleep(0.5)
+                await self._update_message_with_fallback(
+                    channel_id, stream_ts, first_blocks, fallback_text, thread_id
+                )
+
+                # Thread for follow-up messages: use existing thread or stream_ts as anchor
+                reply_thread = slack_thread_ts or stream_ts
+                for chunk_blocks in rest_blocks:
+                    try:
+                        await self.slack_client.client.chat_postMessage(
+                            channel=channel_id,
+                            thread_ts=reply_thread,
+                            text=fallback_text,
+                            blocks=chunk_blocks,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to post follow-up message chunk: {e}")
+
+                logger.info(f"Multi-message: sent {len(messages)} messages")
+
+            elif custom_blocks is not None:
                 # ---------------------------------------------------------------
                 # Custom blocks path: transformer returned list[dict]
                 # The streamed text will be fully replaced by the custom blocks.

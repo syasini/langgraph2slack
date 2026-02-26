@@ -37,7 +37,13 @@ def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
 
     - ``only_one_table_allowed``: keeps only the first ``table`` block, drops the rest.
     - ``downloading image`` / generic ``invalid_blocks``: strips all ``image`` blocks.
+
+    Returns the blocks unchanged if they appear to be a multi-message payload
+    (list[list[dict]]) — that case is handled upstream by the ``is_multi_message`` path.
     """
+    # Guard: multi-message payloads (list[list[dict]]) cannot be cleaned this way
+    if blocks and isinstance(blocks[0], list):
+        return blocks
     if "only_one_table_allowed" in error_str:
         cleaned = []
         seen_table = False
@@ -843,11 +849,47 @@ class SlackBot:
                         f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks"
                     )
 
-                    blocks = self._prepare_send_blocks(blocks, response_text, has_custom_blocks)
-                    logger.info(f"Prepared blocks for send: {len(blocks)} total")
+                    # Detect multi-message response: transformer returned list[list[dict]]
+                    is_multi_message = (
+                        has_custom_blocks
+                        and bool(blocks)
+                        and isinstance(blocks[0], list)
+                    )
+
+                    if is_multi_message:
+                        first_blocks, *rest_blocks = blocks
+                        # Send/update first chunk
+                        if placeholder_ts:
+                            await self.slack_app.client.chat_update(
+                                channel=context.channel_id,
+                                ts=placeholder_ts,
+                                text=response_text,
+                                blocks=first_blocks,
+                            )
+                            result = {"ts": placeholder_ts}
+                        else:
+                            result = await say(
+                                text=response_text,
+                                thread_ts=thread_ts,
+                                blocks=first_blocks,
+                            )
+                        # Send remaining chunks as follow-up messages in the same thread
+                        reply_thread = thread_ts or (result.get("ts") if result else None)
+                        for chunk_blocks in rest_blocks:
+                            await say(
+                                text=" ",
+                                thread_ts=reply_thread,
+                                blocks=chunk_blocks,
+                            )
+                        logger.info(f"Multi-message: sent {1 + len(rest_blocks)} messages")
+                    else:
+                        blocks = self._prepare_send_blocks(blocks, response_text, has_custom_blocks)
+                        logger.info(f"Prepared blocks for send: {len(blocks)} total")
 
                     # Update placeholder or send new message
-                    if placeholder_ts:
+                    if is_multi_message:
+                        pass  # already handled above
+                    elif placeholder_ts:
                         # Update the placeholder message
                         logger.info(f"Updating placeholder message {placeholder_ts}")
                         try:
