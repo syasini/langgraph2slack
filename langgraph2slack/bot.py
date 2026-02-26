@@ -70,6 +70,7 @@ class SlackBot:
         stream_buffer_max_chunks: int = 10,
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
+        structured_output: bool = False,
     ):
         """Initialize SlackBot.
 
@@ -134,6 +135,20 @@ class SlackBot:
                 in each task card and add a "View Full Details" button (default: True).
                 Clicking the button opens a modal with full untruncated content (SQL, JSON, etc.).
                 Set to False to show only tool name + status.
+            structured_output: Pass the full LangGraph state dict to output transformers (default: False).
+                When True, @bot.transform_output receives the complete runs.join() state dict instead of
+                just the last AI message text. Use this when your graph has custom state keys
+                (e.g. image_url, table) that you want to access in a block-building transformer.
+                In streaming mode, also captures "values" events to get the final state after all
+                nodes have run. Example usage:
+                    bot = SlackBot(structured_output=True)
+
+                    @bot.transform_output
+                    async def build_blocks(state: dict) -> list[dict]:
+                        return [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": state["summary"]}},
+                            {"type": "image", "image_url": state["chart_url"], "alt_text": "chart"},
+                        ]
         """
         logger.info("Initializing SlackBot...")
 
@@ -160,6 +175,7 @@ class SlackBot:
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
         self.show_tool_calls = show_tool_calls
         self.show_tool_call_details = show_tool_call_details
+        self.structured_output = structured_output
 
         # Shared store for tool call data used by the "View Full Details" modal.
         # Maps plan_ts (Slack message timestamp) -> list[ActiveToolCall].
@@ -215,6 +231,7 @@ class SlackBot:
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
                 tool_call_store=self.tool_call_store,
+                structured_output=self.structured_output,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:
@@ -233,6 +250,7 @@ class SlackBot:
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
                 tool_call_store=self.tool_call_store,
+                structured_output=self.structured_output,
             )
             logger.info("Using MessageHandler (non-streaming)")
 

@@ -5,15 +5,22 @@ sending to LangGraph.
 """
 
 import inspect
-from typing import Awaitable, Callable, List, Union
+from typing import Any, Awaitable, Callable, Dict, List, Union
 
 from .config import MessageContext
 
+# Type aliases for transformer input/output
+# Input: str (text response) or dict (full LangGraph state when structured_output=True)
+# Output: str (transformed text) or list[dict] (custom Slack blocks)
+TransformerInput = Union[str, Dict[str, Any]]
+TransformerOutput = Union[str, List[Dict[str, Any]]]
+
 # Type alias for transformer functions
-# Signature: async def transformer(message: str, context: MessageContext) -> str
-# Or: async def transformer(message: str) -> str (context optional)
+# Signature: async def transformer(message: TransformerInput, context: MessageContext) -> TransformerOutput
+# Or: async def transformer(message: TransformerInput) -> TransformerOutput (context optional)
 TransformerFunc = Union[
-    Callable[[str, MessageContext], Awaitable[str]], Callable[[str], Awaitable[str]]
+    Callable[[TransformerInput, MessageContext], Awaitable[TransformerOutput]],
+    Callable[[TransformerInput], Awaitable[TransformerOutput]],
 ]
 
 
@@ -67,19 +74,24 @@ class TransformerChain:
         self._transformers.append(transformer)
         return transformer
 
-    async def apply(self, message: str, context: MessageContext) -> str:
+    async def apply(self, message: TransformerInput, context: MessageContext) -> TransformerOutput:
         """Apply all transformers in order.
 
         Each transformer receives the output of the previous one.
         If no transformers are registered, returns the message unchanged.
         Automatically detects if transformer accepts context parameter.
 
+        If a transformer returns a list of dicts (Slack blocks), the chain stops
+        immediately — remaining transformers are skipped since blocks cannot be
+        further processed as strings.
+
         Args:
-            message: Input message
+            message: Input message (str) or full LangGraph state dict
             context: Message context
 
         Returns:
-            Transformed message after applying all transformers
+            Transformed message (str) or Slack blocks (list[dict]) if a transformer
+            returned blocks
 
         Example:
             # If we have transformers: [add_prefix, add_suffix]
@@ -102,6 +114,11 @@ class TransformerChain:
             else:
                 # Transformer only accepts (message)
                 result = await transformer(result)
+
+            # If the transformer returned Slack blocks, stop the chain —
+            # subsequent string transformers cannot process block lists.
+            if isinstance(result, list):
+                break
 
         return result
 

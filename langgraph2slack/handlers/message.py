@@ -46,6 +46,7 @@ class MessageHandler(BaseHandler):
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         tool_call_store: Optional[Dict] = None,
+        structured_output: bool = False,
     ):
         """Initialize message handler.
 
@@ -64,6 +65,7 @@ class MessageHandler(BaseHandler):
             show_tool_calls: Show plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output + View Details button (default: True)
             tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall]
+            structured_output: Pass full LangGraph state dict to output transformers (default: False)
         """
         # Initialize base class
         super().__init__(
@@ -77,6 +79,7 @@ class MessageHandler(BaseHandler):
             show_tool_calls=show_tool_calls,
             show_tool_call_details=show_tool_call_details,
             tool_call_store=tool_call_store,
+            structured_output=structured_output,
         )
         # Store handler-specific attributes
         self.client = langgraph_client
@@ -133,19 +136,36 @@ class MessageHandler(BaseHandler):
                 langgraph_response, context.channel_id, slack_thread_ts, run_id
             )
 
-        # Step 5: Extract the actual message content
-        response_text = self._extract_message_content(langgraph_response)
-        logger.debug(f"LangGraph response: {response_text[:100]}...")
+        # Step 5: Choose transformer input based on structured_output flag
+        if self.structured_output:
+            # Pass the full LangGraph state dict so transformers can access
+            # custom state keys (e.g. image_url, table) beyond the last message.
+            transformer_input = langgraph_response
+            logger.debug("structured_output=True: passing full state dict to output transformers")
+        else:
+            # Default: extract last AI message text (existing behaviour)
+            transformer_input = self._extract_message_content(langgraph_response)
+            logger.debug(f"LangGraph response: {str(transformer_input)[:100]}...")
 
         # Step 6: Apply output transformers
-        # Each transformer can modify the response (add footer, filter, etc.)
-        transformed_output = await self.output_transformers.apply(response_text, context)
+        # Each transformer can modify the response (add footer, filter content, etc.)
+        # or return a list of Slack block dicts for fully custom layouts.
+        transformed_output = await self.output_transformers.apply(transformer_input, context)
 
-        # Step 7: Convert markdown to Slack's format
-        slack_formatted = clean_markdown(transformed_output)
-
-        # Step 8: Extract markdown images and create blocks
-        blocks = self._create_blocks(transformed_output, langgraph_thread)
+        # Step 7: Branch on whether the transformer returned blocks or text
+        if isinstance(transformed_output, list):
+            # Transformer returned custom Slack blocks — use them directly.
+            # Extract text from last message for Slack's notification preview.
+            fallback_text = self._extract_text_fallback(langgraph_response)
+            slack_formatted = clean_markdown(fallback_text)
+            blocks = self._create_blocks(fallback_text, langgraph_thread, custom_blocks=transformed_output)
+            logger.info(
+                f"Output transformer returned {len(transformed_output)} custom blocks"
+            )
+        else:
+            # Transformer returned a string — standard text + image extraction path.
+            slack_formatted = clean_markdown(transformed_output)
+            blocks = self._create_blocks(transformed_output, langgraph_thread)
 
         return slack_formatted, blocks, langgraph_thread, run_id
 

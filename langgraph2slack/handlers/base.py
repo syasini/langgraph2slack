@@ -34,6 +34,7 @@ class BaseHandler:
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         tool_call_store: Optional[Dict] = None,
+        structured_output: bool = False,
     ):
         """Initialize base handler.
 
@@ -49,6 +50,10 @@ class BaseHandler:
             show_tool_call_details: Show truncated input/output preview + View Details button (default: True)
             tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall] for the
                              "View Full Details" modal. Passed by reference from SlackBot.
+            structured_output: When True, pass the full LangGraph state dict to output
+                               transformers instead of extracting only the last message text.
+                               Use this when your graph has custom state keys (e.g. image_url,
+                               table) that you want to access in a transform_output transformer.
         """
         self.assistant_id = assistant_id
         self.input_transformers = input_transformers
@@ -59,6 +64,7 @@ class BaseHandler:
         self.max_image_blocks = max_image_blocks
         self.show_tool_calls = show_tool_calls
         self.show_tool_call_details = show_tool_call_details
+        self.structured_output = structured_output
         # Shared store: plan_ts -> list[ActiveToolCall]; same dict reference across bot + handlers
         self.tool_call_store: Dict = tool_call_store if tool_call_store is not None else {}
 
@@ -119,37 +125,82 @@ class BaseHandler:
         self,
         response_text: str,
         thread_id: str,
+        custom_blocks: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """Create Slack blocks for images and feedback.
 
-        Extracts markdown images from response (if enabled), limits them to max_image_blocks,
-        and adds feedback blocks.
+        When custom_blocks is provided (returned by a block-returning transform_output
+        transformer), skips image extraction and uses those blocks directly, appending
+        only the feedback/thread-id blocks.
+
+        When custom_blocks is None (default), extracts markdown images from response
+        (if enabled) and adds feedback blocks — existing behavior.
 
         Args:
-            response_text: Complete response text (may contain markdown images)
+            response_text: Complete response text (may contain markdown images).
+                           Used for image extraction when custom_blocks is None.
             thread_id: LangGraph thread ID for feedback tracking
+            custom_blocks: Pre-built Slack blocks from a transformer (optional).
+                           When provided, these replace the default image extraction.
 
         Returns:
-            List of Slack block dicts (image blocks + feedback blocks)
+            List of Slack block dicts
         """
-        # Extract markdown images from response if enabled
-        if self.extract_images:
-            image_blocks = extract_markdown_images(response_text, max_images=self.max_image_blocks)
-        else:
-            image_blocks = []
-
-        # Create feedback blocks
+        # Create feedback blocks (always appended regardless of custom_blocks)
         feedback_blocks = create_feedback_block(
             thread_id=thread_id,
             show_feedback_buttons=self.show_feedback_buttons,
             show_thread_id=self.show_thread_id,
         )
 
-        # Combine and return
-        blocks = image_blocks + feedback_blocks
-        logger.info(
-            f"Created {len(image_blocks)} image blocks and "
-            f"{len(feedback_blocks)} feedback blocks"
-        )
+        if custom_blocks is not None:
+            # Use transformer-provided blocks; skip image extraction
+            blocks = custom_blocks + feedback_blocks
+            logger.info(
+                f"Using {len(custom_blocks)} custom blocks from transformer and "
+                f"{len(feedback_blocks)} feedback blocks"
+            )
+        else:
+            # Default path: extract markdown images from response if enabled
+            if self.extract_images:
+                image_blocks = extract_markdown_images(
+                    response_text, max_images=self.max_image_blocks
+                )
+            else:
+                image_blocks = []
+
+            blocks = image_blocks + feedback_blocks
+            logger.info(
+                f"Created {len(image_blocks)} image blocks and "
+                f"{len(feedback_blocks)} feedback blocks"
+            )
 
         return blocks
+
+    def _extract_text_fallback(self, run_output: Dict) -> str:
+        """Extract last message content as a plain text fallback.
+
+        Used when a transformer returns custom blocks — we still need a short
+        text string for Slack's notification preview (the ``text=`` parameter
+        in chat_update / say).
+
+        Args:
+            run_output: Full LangGraph state dict from runs.join()
+
+        Returns:
+            Last AI message content as a string, or empty string if unavailable.
+        """
+        try:
+            messages = run_output.get("messages", [])
+            if not messages:
+                return ""
+            content = messages[-1].get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+                )
+            return str(content)
+        except Exception:
+            return ""
