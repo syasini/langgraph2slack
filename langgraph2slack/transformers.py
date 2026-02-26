@@ -128,10 +128,10 @@ class TransformerChain:
                     f"keeping previous value"
                 )
                 result = previous
-            elif not isinstance(result, (str, list)):
+            elif not isinstance(result, (str, list, dict)):
                 raise TypeError(
                     f"Transformer '{func_name}' returned {type(result).__name__}, "
-                    f"expected str or list[dict]"
+                    f"expected str, list[dict], or dict"
                 )
 
             # If the transformer returned Slack blocks, stop the chain —
