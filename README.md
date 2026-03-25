@@ -6,6 +6,20 @@
 
 Simple, minimal package to connect LangGraph applications to Slack with just a few lines of code.
 
+## Why langgraph2slack?
+
+You've built a LangGraph agent. Now your team wants to use it, but they live in Slack, not in a Python terminal or a custom web UI.
+
+Wiring a LangGraph agent to Slack from scratch means learning Slack's Bolt framework, handling event routing, managing streaming APIs, and keeping Slack threads in sync with LangGraph conversation threads. That's a lot of plumbing before your agent is actually useful to anyone.
+
+langgraph2slack handles all of that for you. Point it at your existing LangGraph agent and your Slack bot is ready, with real-time streaming, thread memory, and optional LangSmith feedback tracking out of the box.
+
+**When to use it:**
+
+* You have a LangGraph agent and want to make it accessible to teammates or users via Slack
+* You're building an internal AI assistant (a data analyst bot, a support bot, a knowledge base Q&A bot) and Slack is where your users already are
+* You want production-ready features like streaming, memory, and feedback collection without writing the integration layer yourself
+
 ## Installation
 
 ```bash
