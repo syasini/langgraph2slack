@@ -12,7 +12,7 @@ You've built a **LangGraph agent**. Now your team wants to use it, but they live
 
 Wiring a LangGraph agent to Slack from scratch means learning Slack's Bolt framework, handling event routing, managing streaming APIs, and keeping Slack threads in sync with LangGraph conversation threads. *That's a lot of plumbing* before your agent is actually useful to anyone.
 
-langgraph2slack handles all of that for you. Point it at your existing LangGraph agent and your Slack bot is ready, with **real-time streaming**, **thread memory**, and optional **LangSmith feedback tracking** out of the box. Chat with it directly via DM, or **@mention** it in any channel.
+langgraph2slack handles all of that for you. Point it at your existing LangGraph agent and your Slack bot is ready, with **real-time streaming**, **thread memory**, and optional **LangSmith feedback tracking** out of the box. Chat with it directly via DM, or **@mention** it in any channel!
 
 **When to use it:**
 
