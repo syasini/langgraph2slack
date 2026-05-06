@@ -48,6 +48,7 @@ class StreamingHandler(BaseHandler):
         extract_images: bool = True,
         max_image_blocks: int = 5,
         metadata_builder=None,
+        config_builder=None,
         message_types: list[str] = None,
         stream_buffer_time: float = 0.1,
         stream_buffer_max_chunks: int = 10,
@@ -69,6 +70,7 @@ class StreamingHandler(BaseHandler):
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
+            config_builder: Async function to build config dict from MessageContext
             message_types: List of message types to process (default: ["AIMessageChunk"])
             stream_buffer_time: Time in seconds to buffer chunks before flushing (default: 0.1).
                 Buffer flushes when EITHER this time elapses OR stream_buffer_max_chunks is reached.
@@ -96,6 +98,7 @@ class StreamingHandler(BaseHandler):
         self.slack_client = slack_client
         self.reply_in_thread = reply_in_thread
         self.metadata_builder = metadata_builder
+        self.config_builder = config_builder
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
 
         # Streaming buffer configuration
@@ -494,6 +497,9 @@ class StreamingHandler(BaseHandler):
         # Build metadata if builder is provided
         metadata = await self.metadata_builder(context) if self.metadata_builder else {}
 
+        # Build config if builder is provided
+        config = await self.config_builder(context) if self.config_builder else None
+
         try:
             # Start streaming from LangGraph
             # stream_mode="messages-tuple" gives us incremental message updates as tuples
@@ -505,6 +511,7 @@ class StreamingHandler(BaseHandler):
                 multitask_strategy="interrupt",
                 if_not_exists="create",
                 metadata=metadata,
+                config=config,
             ):
                 chunk_count += 1
                 logger.debug(f"Chunk #{chunk_count}: event={chunk.event}")
