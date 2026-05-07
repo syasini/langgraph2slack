@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-05-07
 ### Added
 - `@bot.transform_config` decorator to inject per-run agent configuration — mirrors `@bot.transform_metadata` but passes config to `get_config()` in LangGraph agents, enabling runtime injection of repo names, auth tokens, feature flags, etc.
 - `_update_message_with_incremental_images` in `StreamingHandler` — adds image blocks one at a time so a single bad image URL doesn't break the entire update
@@ -20,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Bare `except:` clauses in `StreamingHandler` replaced with `except Exception:` (E722)
 - Unsorted imports across `block_transformers/` modules
-
 ## [0.5.0] - 2026-02-26
 ### Added
 - Built-in block transformer library (`langgraph2slack.block_transformers`) with four ready-to-use async transformers:
