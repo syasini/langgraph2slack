@@ -357,6 +357,7 @@ class TestInvokeLangGraph:
             input={"messages": [{"role": "user", "content": "Hello"}]},
             if_not_exists="create",
             metadata={},
+            config=None,
         )
 
         # Verify join was called with run_id

@@ -5,6 +5,7 @@ Fixtures are automatically discovered by pytest and available to all test files.
 """
 
 import pytest
+from langgraph2slack import SlackBot
 from langgraph2slack.config import MessageContext
 
 
@@ -227,3 +228,38 @@ def valid_env_vars(monkeypatch):
     yield env_vars
 
     # Auto cleanup by monkeypatch fixture
+
+
+# ============================================================================
+# SlackBot Instance Fixtures
+# ============================================================================
+
+
+@pytest.fixture
+def slack_bot(valid_env_vars):
+    """SlackBot instance with streaming enabled for testing.
+
+    Returns:
+        SlackBot: Configured bot instance with default settings
+    """
+    return SlackBot(streaming=True)
+
+
+@pytest.fixture
+def slack_bot_streaming(valid_env_vars):
+    """SlackBot instance explicitly with streaming enabled.
+
+    Returns:
+        SlackBot: Bot configured for streaming responses
+    """
+    return SlackBot(streaming=True)
+
+
+@pytest.fixture
+def slack_bot_nonstreaming(valid_env_vars):
+    """SlackBot instance with streaming disabled.
+
+    Returns:
+        SlackBot: Bot configured for non-streaming responses
+    """
+    return SlackBot(streaming=False)

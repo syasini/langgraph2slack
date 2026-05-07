@@ -201,6 +201,7 @@ class SlackBot:
         self._input_transformers = TransformerChain()
         self._output_transformers = TransformerChain()
         self._metadata_transformers = TransformerChain()
+        self._config_transformers = TransformerChain()
 
         # Initialize LangSmith client for feedback
         self.langsmith_client = Client()
@@ -237,6 +238,7 @@ class SlackBot:
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
+                config_builder=self._build_config,
                 message_types=self.message_types,
                 stream_buffer_time=stream_buffer_time,
                 stream_buffer_max_chunks=stream_buffer_max_chunks,
@@ -256,6 +258,7 @@ class SlackBot:
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
+                config_builder=self._build_config,
                 slack_client=self.slack_app,
                 reply_in_thread=self.reply_in_thread,
                 show_tool_calls=self.show_tool_calls,
@@ -405,6 +408,32 @@ class SlackBot:
             The function (for decorator usage)
         """
         return self._metadata_transformers.add(func)
+
+    def transform_config(self, func: Callable) -> Callable:
+        """Decorator to add a config transformer.
+
+        Config transformers build the LangGraph config dict (containing configurable
+        fields) passed to runs.create() / runs.stream(). This enables injecting
+        per-run configuration like repo name, user context, or feature flags that the
+        agent graph reads via get_config().
+
+        Example:
+            @bot.transform_config
+            async def inject_repo(config: dict, context: MessageContext) -> dict:
+                config.setdefault("configurable", {})
+                repo = extract_repo_from_text(context.event.get("text", ""))
+                if repo:
+                    config["configurable"]["repo"] = repo
+                config["configurable"]["source"] = "slack"
+                return config
+
+        Args:
+            func: Async function (config: dict, context: MessageContext) -> dict
+
+        Returns:
+            The function (for decorator usage)
+        """
+        return self._config_transformers.add(func)
 
     def _load_config(
         self,
@@ -731,6 +760,22 @@ class SlackBot:
             "slack_is_dm": context.is_dm,
             "slack_is_thread": context.is_thread,
         }
+
+    async def _build_config(self, context: MessageContext) -> dict | None:
+        """Build config dict for LangGraph agent.
+
+        Config transformers inject configurable fields that the agent graph
+        reads via get_config(). Returns None if no transformers are registered.
+
+        Args:
+            context: Message context with Slack event data
+
+        Returns:
+            Config dict with "configurable" key, or None if no transformers
+        """
+        if not self._config_transformers:
+            return None
+        return await self._config_transformers.apply({}, context)
 
     def _setup_slack_handlers(self) -> None:
         """Setup Slack event handlers.

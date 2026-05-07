@@ -41,6 +41,7 @@ class MessageHandler(BaseHandler):
         extract_images: bool = True,
         max_image_blocks: int = 5,
         metadata_builder=None,
+        config_builder=None,
         slack_client=None,
         reply_in_thread: bool = True,
         show_tool_calls: bool = False,
@@ -59,6 +60,7 @@ class MessageHandler(BaseHandler):
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
+            config_builder: Async function to build config dict from MessageContext
             slack_client: Slack Bolt AsyncApp (required when show_tool_calls=True)
             reply_in_thread: Reply in thread vs main channel (default: True)
             show_tool_calls: Show plan block with tool call status (default: False)
@@ -81,6 +83,7 @@ class MessageHandler(BaseHandler):
         # Store handler-specific attributes
         self.client = langgraph_client
         self.metadata_builder = metadata_builder
+        self.config_builder = config_builder
         self.slack_client = slack_client
         self.reply_in_thread = reply_in_thread
 
@@ -321,6 +324,9 @@ class MessageHandler(BaseHandler):
         # Build metadata if builder is provided
         metadata = await self.metadata_builder(context) if self.metadata_builder else {}
 
+        # Build config if builder is provided
+        config = await self.config_builder(context) if self.config_builder else None
+
         try:
             # Use LangGraph SDK to create a run and wait for completion
             run = await self.client.runs.create(
@@ -329,6 +335,7 @@ class MessageHandler(BaseHandler):
                 input={"messages": [{"role": "user", "content": message}]},
                 if_not_exists="create",
                 metadata=metadata,
+                config=config,
             )
 
             run_id = run["run_id"]
