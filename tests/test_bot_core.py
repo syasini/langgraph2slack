@@ -10,7 +10,7 @@ This completes testing of the core orchestration logic.
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from langgraph2slack.bot import SlackBot
+from langgraph2slack.bot import SlackBot, _clean_blocks_for_retry
 from langgraph2slack.config import MessageContext
 
 
@@ -254,6 +254,23 @@ class TestBuildMetadata:
         assert "slack_user_id" not in metadata
 
     @pytest.mark.asyncio
+    async def test_build_metadata_with_context_only_transformer(
+        self, minimal_bot, sample_context
+    ):
+        """Should support the documented single-argument context signature."""
+        @minimal_bot.transform_metadata
+        async def custom_metadata(context: MessageContext) -> dict:
+            return {
+                "custom_user": context.user_id,
+                "custom_channel": context.channel_id,
+            }
+
+        metadata = await minimal_bot._build_metadata(sample_context)
+
+        assert metadata["custom_user"] == "U123USER"
+        assert metadata["custom_channel"] == "C456CHANNEL"
+
+    @pytest.mark.asyncio
     async def test_build_metadata_multiple_transformers(self, minimal_bot, sample_context):
         """Multiple metadata transformers should be applied in order."""
         @minimal_bot.transform_metadata
@@ -274,6 +291,16 @@ class TestBuildMetadata:
         assert metadata["step"] == "second"  # Modified by second transformer
         assert metadata["user_id"] == "U123USER"  # From first transformer
         assert metadata["channel_id"] == "C456CHANNEL"  # Added by second transformer
+
+    @pytest.mark.asyncio
+    async def test_build_metadata_rejects_list_return(self, minimal_bot, sample_context):
+        """Metadata transformers should reject Slack block lists."""
+        @minimal_bot.transform_metadata
+        async def bad_metadata(data: dict, context: MessageContext) -> dict:
+            return [{"type": "section"}]
+
+        with pytest.raises(TypeError, match="expected dict"):
+            await minimal_bot._build_metadata(sample_context)
 
 
 # ============================================================================
@@ -397,19 +424,19 @@ class TestNonStreamingCustomBlocks:
 
         assert result[0] == custom_block, "Custom block should be first — no text section prepended"
         assert not any(
-            b == {"type": "section", "text": {"type": "mrkdwn", "text": "Fallback text"}}
+            b == {"type": "markdown", "text": "Fallback text"}
             for b in result
-        ), "Fallback text section should not appear when has_custom_blocks=True"
+        ), "Fallback text block should not appear when has_custom_blocks=True"
 
     def test_text_blocks_get_text_section_prepended(self, minimal_bot):
-        """When has_custom_blocks=False, _prepare_send_blocks should prepend a text section."""
+        """When has_custom_blocks=False, _prepare_send_blocks should prepend a markdown block."""
         feedback_block = {"type": "actions", "elements": []}
         blocks = [feedback_block]
 
         result = minimal_bot._prepare_send_blocks(blocks, "The response text", has_custom_blocks=False)
 
-        assert result[0]["type"] == "section"
-        assert result[0]["text"]["text"] == "The response text"
+        assert result[0]["type"] == "markdown"
+        assert result[0]["text"] == "The response text"
         assert result[1] == feedback_block
 
     def test_empty_blocks_returned_unchanged(self, minimal_bot):
@@ -418,9 +445,46 @@ class TestNonStreamingCustomBlocks:
         assert minimal_bot._prepare_send_blocks([], "text", has_custom_blocks=True) == []
 
     def test_text_section_content_matches_response_text(self, minimal_bot):
-        """Prepended text section should contain the exact response_text passed in."""
+        """Prepended markdown block should contain the exact response_text passed in."""
         feedback_block = {"type": "context", "elements": []}
         result = minimal_bot._prepare_send_blocks(
             [feedback_block], "Hello *world*", has_custom_blocks=False
         )
-        assert result[0]["text"]["text"] == "Hello *world*"
+        assert result[0]["text"] == "Hello *world*"
+
+    def test_retry_cleaning_degrades_markdown_blocks_to_mrkdwn_sections(self):
+        """Generic invalid_blocks retry should fall back from markdown block to section."""
+        blocks = [
+            {"type": "markdown", "text": "# Title\n\n**Bold**"},
+            {"type": "image", "image_url": "https://example.com/image.png", "alt_text": "Image"},
+            {"type": "context", "elements": []},
+        ]
+
+        result = _clean_blocks_for_retry(blocks, "invalid_blocks")
+
+        assert result[0] == {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "# Title\n\n*Bold*"},
+        }
+        assert all(b.get("type") != "image" for b in result)
+        assert result[-1] == {"type": "context", "elements": []}
+
+    def test_retry_cleaning_for_image_download_preserves_markdown_with_visible_url(self):
+        """Image download retries should remove image blocks but keep image URLs in text."""
+        blocks = [
+            {
+                "type": "markdown",
+                "text": "Look: ![Plant](https://example.com/plant.png)",
+            },
+            {"type": "image", "image_url": "https://example.com/plant.png", "alt_text": "Plant"},
+            {"type": "context", "elements": []},
+        ]
+
+        result = _clean_blocks_for_retry(blocks, "invalid_blocks downloading image failed")
+
+        assert result[0] == {
+            "type": "markdown",
+            "text": "Look: Plant: https://example.com/plant.png",
+        }
+        assert all(b.get("type") != "image" for b in result)
+        assert result[-1] == {"type": "context", "elements": []}

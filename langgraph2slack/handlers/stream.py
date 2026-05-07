@@ -6,18 +6,32 @@ forwarded to Slack as they arrive, minimizing latency.
 
 import asyncio
 import logging
-import re
 import time
 from typing import Optional
 
 from ..config import MessageContext
-from ..transformers import TransformerChain
-from ..tool_calls import ToolCallTracker
-from ..utils import clean_markdown, create_plan_block, create_tool_details_button, remove_markdown_images
 from ..mixins import ReactionMixin
+from ..tool_calls import ToolCallTracker
+from ..transformers import TransformerChain
+from ..utils import (
+    clean_markdown,
+    create_markdown_text_block,
+    create_mrkdwn_text_block,
+    create_plan_block,
+    create_tool_details_button,
+    replace_markdown_images_with_links,
+)
 from .base import BaseHandler
 
 logger = logging.getLogger(__name__)
+
+
+def _is_image_block_error(error: Exception) -> bool:
+    """Return True when Slack rejected an image block download/render."""
+    error_str = str(error).lower()
+    return "downloading image" in error_str or (
+        "invalid_blocks" in error_str and "image_url" in error_str
+    )
 
 
 class StreamingHandler(BaseHandler):
@@ -575,6 +589,7 @@ class StreamingHandler(BaseHandler):
                         # as a full message (not streaming chunks). This is the typical pattern
                         # with create_react_agent / create_agent.
                         import json as _json
+
                         tool_calls = message_data.get("tool_calls", [])
                         if tool_calls:
                             logger.info(
@@ -636,9 +651,7 @@ class StreamingHandler(BaseHandler):
                         tracker.handle_result(tool_call_id, str(result))
 
                         if plan_ts:
-                            await self._update_plan_block(
-                                slack_channel, plan_ts, tracker, run_id
-                            )
+                            await self._update_plan_block(slack_channel, plan_ts, tracker, run_id)
                         else:
                             # Plan block was never posted — post it now retroactively.
                             # This handles the case where the tool call start event was
@@ -723,7 +736,7 @@ class StreamingHandler(BaseHandler):
             try:
                 if buffer:
                     await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
-            except:
+            except Exception:
                 pass  # Best effort
 
             # Try to append error message to stream
@@ -733,7 +746,7 @@ class StreamingHandler(BaseHandler):
                     stream_ts=slack_stream_ts,
                     content="\n\n_Error: Unable to complete response_",
                 )
-            except:
+            except Exception:
                 pass  # Best effort
 
         # Apply output transformers to the accumulated text response.
@@ -855,7 +868,7 @@ class StreamingHandler(BaseHandler):
                 show_feedback_buttons=self.show_feedback_buttons,
                 show_thread_id=self.show_thread_id,
             )
-            text_block = {"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}
+            text_block = create_mrkdwn_text_block(fallback_text)
             fallback_blocks = [text_block] + feedback_only_blocks
 
             try:
@@ -868,6 +881,57 @@ class StreamingHandler(BaseHandler):
                 logger.info("Fallback succeeded: sent text + feedback blocks only")
             except Exception as fallback_error:
                 logger.error(f"Failed even with fallback blocks: {fallback_error}")
+
+    async def _update_message_with_incremental_images(
+        self,
+        channel_id: str,
+        stream_ts: str,
+        text_block: dict,
+        image_blocks: list,
+        footer_blocks: list,
+        fallback_text: str,
+        thread_id: str = None,
+    ) -> None:
+        """Update safe text/footer first, then add image blocks one at a time.
+
+        This performs one base ``chat.update`` plus one candidate update for
+        each extracted image block. ``image_blocks`` is already bounded by
+        ``max_image_blocks`` when default image extraction builds the block list.
+        """
+        base_blocks = [text_block] + footer_blocks
+        await self._update_message_with_fallback(
+            channel_id,
+            stream_ts,
+            base_blocks,
+            fallback_text,
+            thread_id,
+        )
+
+        accepted_image_blocks = []
+        for image_block in image_blocks:
+            candidate_blocks = [text_block] + accepted_image_blocks + [image_block] + footer_blocks
+            try:
+                await self.slack_client.client.chat_update(
+                    channel=channel_id,
+                    ts=stream_ts,
+                    text=fallback_text,
+                    blocks=candidate_blocks,
+                )
+                accepted_image_blocks.append(image_block)
+                logger.info("Accepted image block: " f"{image_block.get('image_url')}")
+            except Exception as image_error:
+                if _is_image_block_error(image_error):
+                    logger.warning(
+                        "Skipping image block rejected by Slack: "
+                        f"{image_block.get('image_url')} ({image_error})"
+                    )
+                    continue
+
+                logger.warning(
+                    "Stopping incremental image updates after "
+                    f"unexpected Slack error: {image_error}"
+                )
+                break
 
     async def _stop_slack_stream(
         self,
@@ -997,16 +1061,25 @@ class StreamingHandler(BaseHandler):
                 if blocks:
                     await asyncio.sleep(0.5)
 
-                    # Remove image markdown from text (shown as image blocks instead)
-                    text_without_images = remove_markdown_images(display_text)
-                    slack_text = clean_markdown(text_without_images, for_blocks=True)
+                    # Keep image source URLs visible in the text while also
+                    # rendering Slack image blocks below it.
+                    text_with_image_links = replace_markdown_images_with_links(display_text)
+                    slack_text = clean_markdown(text_with_image_links, for_blocks=True)
 
-                    # Prepend text block to preserve streamed content alongside images + feedback
-                    text_block = {"type": "section", "text": {"type": "mrkdwn", "text": slack_text}}
-                    all_blocks = [text_block] + blocks
+                    # Prepend a standard Markdown block so Slack preserves headings,
+                    # tables, task lists, dividers, and other Markdown constructs.
+                    text_block = create_markdown_text_block(text_with_image_links)
+                    image_blocks = [b for b in blocks if b.get("type") == "image"]
+                    feedback_thread_blocks = [b for b in blocks if b.get("type") != "image"]
 
-                    await self._update_message_with_fallback(
-                        channel_id, stream_ts, all_blocks, slack_text, thread_id
+                    await self._update_message_with_incremental_images(
+                        channel_id,
+                        stream_ts,
+                        text_block,
+                        image_blocks,
+                        feedback_thread_blocks,
+                        slack_text,
+                        thread_id,
                     )
 
         except Exception as e:

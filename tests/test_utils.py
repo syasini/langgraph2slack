@@ -12,6 +12,7 @@ from langgraph2slack.utils import (
     clean_markdown,
     extract_markdown_images,
     remove_markdown_images,
+    replace_markdown_images_with_links,
     is_bot_mention,
     is_dm,
     create_feedback_block,
@@ -437,6 +438,30 @@ class TestRemoveMarkdownImages:
         text = "Check [this link](https://example.com) for details."
         result = remove_markdown_images(text)
         assert "[this link]" in result
+
+
+# ============================================================================
+# Tests for replace_markdown_images_with_links()
+# ============================================================================
+
+
+class TestReplaceMarkdownImagesWithLinks:
+    """Tests for preserving image URLs as visible fallback links."""
+
+    def test_replaces_simple_image_with_visible_url(self):
+        text = "See ![chart](https://example.com/chart.png) above."
+        result = replace_markdown_images_with_links(text)
+        assert result == "See chart: https://example.com/chart.png above."
+
+    def test_empty_alt_text_uses_url_only(self):
+        text = "Image: ![](https://example.com/img.png)"
+        result = replace_markdown_images_with_links(text)
+        assert result == "Image: https://example.com/img.png"
+
+    def test_url_with_parentheses(self):
+        text = "Plant: ![Monstera](https://en.wikipedia.org/wiki/Monstera_(plant))"
+        result = replace_markdown_images_with_links(text)
+        assert result == "Plant: Monstera: https://en.wikipedia.org/wiki/Monstera_(plant)"
 
 
 # ============================================================================

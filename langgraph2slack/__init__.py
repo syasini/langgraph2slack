@@ -16,9 +16,9 @@ Example:
     app = bot.app  # Export to langgraph.json
 """
 
+from .block_transformers import render_blocks, render_code_blocks, render_tables, render_todo_lists
 from .bot import SlackBot
 from .config import BotConfig, MessageContext
-from .block_transformers import render_blocks, render_tables, render_todo_lists, render_code_blocks
 
 # Version is dynamically loaded from package metadata (pyproject.toml)
 # Use `uv version --bump patch|minor|major` to update version

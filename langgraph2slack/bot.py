@@ -19,14 +19,17 @@ from slack_bolt.async_app import AsyncApp
 from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
-from .transformers import TransformerChain
+from .transformers import DictTransformerChain, TransformerChain
 from .utils import (
     TOOL_CALL_DETAILS_ACTION_ID,
+    clean_markdown,
     create_feedback_modal,
-    create_plan_block,
+    create_markdown_text_block,
+    create_mrkdwn_text_block,
     extract_feedback_text,
     is_bot_mention,
     is_dm,
+    replace_markdown_images_with_links,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,7 +39,8 @@ def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
     """Return a cleaned copy of blocks suitable for a retry after a known Slack API error.
 
     - ``only_one_table_allowed``: keeps only the first ``table`` block, drops the rest.
-    - ``downloading image`` / generic ``invalid_blocks``: strips all ``image`` blocks.
+    - ``downloading image`` / generic ``invalid_blocks``: strips all ``image`` blocks
+      and degrades ``markdown`` text blocks to legacy ``section``/``mrkdwn`` blocks.
 
     Returns the blocks unchanged if they appear to be a multi-message payload
     (list[list[dict]]) — that case is handled upstream by the ``is_multi_message`` path.
@@ -56,8 +60,36 @@ def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
             else:
                 cleaned.append(b)
         return cleaned
-    # Default: strip image blocks (e.g. image download failure)
-    return [b for b in blocks if b.get("type") != "image"]
+    if "downloading image" in error_str:
+        cleaned = []
+        for b in blocks:
+            if b.get("type") == "image":
+                continue
+            if b.get("type") == "markdown":
+                cleaned.append(
+                    {
+                        **b,
+                        "text": replace_markdown_images_with_links(b.get("text", "")),
+                    }
+                )
+            else:
+                cleaned.append(b)
+        return cleaned
+    # Default: strip image blocks (e.g. image download failure) and convert
+    # markdown blocks to legacy mrkdwn sections if Slack rejected the newer block.
+    cleaned = []
+    for b in blocks:
+        if b.get("type") == "image":
+            continue
+        if b.get("type") == "markdown":
+            text = clean_markdown(
+                replace_markdown_images_with_links(b.get("text", "")),
+                for_blocks=True,
+            )
+            cleaned.append(create_mrkdwn_text_block(text))
+        else:
+            cleaned.append(b)
+    return cleaned
 
 
 class SlackBot:
@@ -200,8 +232,8 @@ class SlackBot:
         # Initialize transformer chains
         self._input_transformers = TransformerChain()
         self._output_transformers = TransformerChain()
-        self._metadata_transformers = TransformerChain()
-        self._config_transformers = TransformerChain()
+        self._metadata_transformers = DictTransformerChain()
+        self._config_transformers = DictTransformerChain()
 
         # Initialize LangSmith client for feedback
         self.langsmith_client = Client()
@@ -490,9 +522,7 @@ class SlackBot:
         """
         # Validate stream_buffer_time
         if stream_buffer_time <= 0:
-            raise ValueError(
-                f"stream_buffer_time must be positive, got {stream_buffer_time}"
-            )
+            raise ValueError(f"stream_buffer_time must be positive, got {stream_buffer_time}")
         if stream_buffer_time > 5.0:
             logger.warning(
                 f"stream_buffer_time={stream_buffer_time}s is very high. "
@@ -542,7 +572,9 @@ class SlackBot:
             ValueError: If required field is missing or invalid type
         """
         if not isinstance(reaction, dict):
-            raise ValueError(f"Reaction config at index {index} must be a dict, got {type(reaction)}")
+            raise ValueError(
+                f"Reaction config at index {index} must be a dict, got {type(reaction)}"
+            )
 
         emoji = reaction.get("emoji")
         target = reaction.get("target")
@@ -705,12 +737,12 @@ class SlackBot:
         response_text: str,
         has_custom_blocks: bool,
     ) -> list:
-        """Prepend a text section to standard block layouts.
+        """Prepend a text block to standard block layouts.
 
         When a transformer returned custom blocks they already encode the full
         layout, so nothing is added. For the default image/feedback layout we
-        prepend the response text as a mrkdwn section so the text remains
-        visible alongside the blocks.
+        prepend the response text as a Slack markdown block so standard Markdown
+        remains visible alongside the blocks.
 
         Args:
             blocks: Block list returned by the handler.
@@ -721,10 +753,7 @@ class SlackBot:
             Final block list ready to send to Slack.
         """
         if blocks and not has_custom_blocks:
-            text_block = {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": response_text},
-            }
+            text_block = create_markdown_text_block(response_text)
             return [text_block] + blocks
         return blocks
 
@@ -883,8 +912,8 @@ class SlackBot:
                                 )
 
                     logger.info("Non-streaming mode: calling handler.process_message")
-                    response_text, blocks, thread_id, run_id, has_custom_blocks = await self.handler.process_message(
-                        message_text, context
+                    response_text, blocks, thread_id, run_id, has_custom_blocks = (
+                        await self.handler.process_message(message_text, context)
                     )
                     logger.info(
                         f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}, has_custom_blocks={has_custom_blocks}"
@@ -896,9 +925,7 @@ class SlackBot:
 
                     # Detect multi-message response: transformer returned list[list[dict]]
                     is_multi_message = (
-                        has_custom_blocks
-                        and bool(blocks)
-                        and isinstance(blocks[0], list)
+                        has_custom_blocks and bool(blocks) and isinstance(blocks[0], list)
                     )
 
                     if is_multi_message:

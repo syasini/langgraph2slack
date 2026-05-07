@@ -40,10 +40,10 @@ Note:
     a block-returning transformer always run on the original string.
 """
 
-from ._tables import render_tables
-from ._todos import render_todo_lists
 from ._code import render_code_blocks
 from ._composite import render_blocks
+from ._tables import render_tables
+from ._todos import render_todo_lists
 
 __all__ = [
     "render_blocks",

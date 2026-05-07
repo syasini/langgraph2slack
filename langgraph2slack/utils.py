@@ -9,6 +9,10 @@ from typing import Dict, List, Optional
 # Action ID for the "View Full Details" button in plan block messages
 TOOL_CALL_DETAILS_ACTION_ID = "tool_call_details"
 
+# Matches URLs inside Markdown links/images, including one level of balanced
+# parentheses such as https://wiki.org/File:Name_(detail).jpg.
+_MARKDOWN_URL_PATTERN = r"(?:[^()]|\([^()]*\))+"
+
 
 def is_bot_mention(text: str, bot_user_id: str) -> bool:
     """Check if bot is mentioned in a message.
@@ -75,20 +79,15 @@ def clean_markdown(text: str, for_blocks: bool = False) -> str:
         >>> clean_markdown("**bold** and *italic*", for_blocks=True)
         '*bold* and _italic_'
     """
-    # URL pattern that handles parentheses in URLs
-    # Matches: non-paren chars OR balanced single-level parens like (text)
-    # This handles URLs like: https://wiki.org/File:Name_(detail).jpg
-    url_pattern = r"(?:[^()]|\([^()]*\))+"
-
     # Convert markdown links: [text](url) -> <url|text>
     # Changed [^\]]+ to [^\]]* to allow empty link text
     # Use balanced parentheses pattern for URLs with parens
-    text = re.sub(rf"\[([^\]]*)\]\(({url_pattern})\)", r"<\2|\1>", text)
+    text = re.sub(rf"\[([^\]]*)\]\(({_MARKDOWN_URL_PATTERN})\)", r"<\2|\1>", text)
 
     # Convert markdown images: ![alt](url) -> !<url|alt>
     # Note: Slack doesn't render images inline in text, but this preserves the format
     # Use balanced parentheses pattern to handle URLs with parens
-    text = re.sub(rf"!\[([^\]]*)\]\(({url_pattern})\)", r"!<\2|\1>", text)
+    text = re.sub(rf"!\[([^\]]*)\]\(({_MARKDOWN_URL_PATTERN})\)", r"!<\2|\1>", text)
 
     # Clean up code blocks: remove language identifier after ```
     # Slack doesn't use language identifiers in the same way
@@ -118,6 +117,41 @@ def clean_markdown(text: str, for_blocks: bool = False) -> str:
     return text
 
 
+def create_markdown_text_block(text: str) -> Dict:
+    """Create a Slack ``markdown`` block from standard Markdown text.
+
+    Slack's ``markdown`` block accepts standard Markdown and converts it to
+    native Block Kit structures (headers, tables, rich text, dividers, etc.).
+    """
+    return {"type": "markdown", "text": text if text.strip() else " "}
+
+
+def create_mrkdwn_text_block(text: str) -> Dict:
+    """Create a legacy ``section`` block with Slack ``mrkdwn`` text."""
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": text if text.strip() else " "},
+    }
+
+
+def replace_markdown_images_with_links(text: str) -> str:
+    """Replace Markdown image references with visible link text.
+
+    Slack's ``markdown`` block translates ``![alt](url)`` to a hyperlink using
+    only the alt text. For image-block fallbacks, keep the URL visible so a
+    failed image download does not make the source disappear from the message.
+    """
+
+    def _replace(match: re.Match) -> str:
+        alt_text = match.group(1).strip()
+        url = match.group(2)
+        if alt_text:
+            return f"{alt_text}: {url}"
+        return url
+
+    return re.sub(rf"!\[([^\]]*)\]\(({_MARKDOWN_URL_PATTERN})\)", _replace, text)
+
+
 def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
     """Extract markdown images and return Slack image blocks.
 
@@ -142,10 +176,7 @@ def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
     # Pattern matches: ![alt text](url)
     # Group 1: alt text (can be empty)
     # Group 2: url - uses balanced parentheses pattern to handle URLs with parens
-    # URL pattern: non-paren chars OR balanced single-level parens like (text)
-    # This handles URLs like: https://wiki.org/File:Name_(detail).jpg
-    url_pattern = r"(?:[^()]|\([^()]*\))+"
-    pattern = rf"!\[([^\]]*)\]\(({url_pattern})\)"
+    pattern = rf"!\[([^\]]*)\]\(({_MARKDOWN_URL_PATTERN})\)"
 
     # Find all image markdown patterns using findall (simpler than manual iteration)
     # findall returns list of tuples: [(alt1, url1), (alt2, url2), ...]
@@ -194,8 +225,7 @@ def remove_markdown_images(text: str) -> str:
         >>> remove_markdown_images("Plant: ![name](https://wiki.org/Monstera_(plant))")
         'Plant: '
     """
-    url_pattern = r"(?:[^()]|\([^()]*\))+"
-    return re.sub(rf"!\[([^\]]*)\]\(({url_pattern})\)", "", text)
+    return re.sub(rf"!\[([^\]]*)\]\(({_MARKDOWN_URL_PATTERN})\)", "", text)
 
 
 def create_feedback_block(

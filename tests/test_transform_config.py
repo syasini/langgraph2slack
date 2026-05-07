@@ -1,7 +1,6 @@
 """Tests for the transform_config decorator and config building."""
 
-import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -81,6 +80,26 @@ class TestBuildConfig:
         config = await slack_bot._build_config(context)
         assert config is not None
         assert config["configurable"]["repo"] == "test-repo"
+
+    @pytest.mark.asyncio
+    async def test_build_config_with_single_arg_transformer(self, slack_bot):
+        """Single-argument config transformers should receive the config dict."""
+        @slack_bot.transform_config
+        async def inject_source(config):
+            config.setdefault("configurable", {})
+            config["configurable"]["source"] = "slack"
+            return config
+
+        event = {
+            "user": "U123",
+            "channel": "C456",
+            "channel_type": "channel",
+            "ts": "1234567890.123456",
+        }
+        context = MessageContext(event)
+
+        config = await slack_bot._build_config(context)
+        assert config["configurable"]["source"] == "slack"
 
     @pytest.mark.asyncio
     async def test_build_config_chains_transformers(self, slack_bot):
@@ -177,6 +196,24 @@ class TestBuildConfig:
         config = await slack_bot._build_config(context)
         assert config["configurable"]["is_thread"] is True
 
+    @pytest.mark.asyncio
+    async def test_build_config_rejects_list_return(self, slack_bot):
+        """Config transformers should reject Slack block lists instead of short-circuiting."""
+        @slack_bot.transform_config
+        async def bad_config(config, context):
+            return [{"type": "section"}]
+
+        event = {
+            "user": "U123",
+            "channel": "C456",
+            "channel_type": "channel",
+            "ts": "1234567890.123456",
+        }
+        context = MessageContext(event)
+
+        with pytest.raises(TypeError, match="expected dict"):
+            await slack_bot._build_config(context)
+
 
 class TestHandlerConfigBuilder:
     """Test that handlers receive config_builder correctly."""
@@ -196,81 +233,71 @@ class TestHandlerConfigBuilder:
         self, slack_bot_streaming
     ):
         """config_builder should be called when processing messages in streaming mode."""
-        builder_called = False
-
-        async def mock_builder(context):
-            nonlocal builder_called
-            builder_called = True
-            return None
-
+        expected_config = {"configurable": {"repo": "stream-repo"}}
+        mock_builder = AsyncMock(return_value=expected_config)
         slack_bot_streaming.handler.config_builder = mock_builder
 
-        # Mock the LangGraph client to avoid actual API calls
-        with patch.object(
-            slack_bot_streaming.handler.langgraph_client.runs, "stream", new_callable=AsyncMock
-        ):
-            event = {
-                "user": "U123",
-                "channel": "C456",
-                "channel_type": "channel",
-                "ts": "1234567890.123456",
-                "text": "Hello bot",
-            }
-            context = MessageContext(event)
+        async def empty_stream(*args, **kwargs):
+            if False:
+                yield None
 
-            try:
-                # This will fail but we just need to trigger config_builder
-                await slack_bot_streaming.handler._stream_from_langgraph_to_slack(
-                    message="Hello",
-                    context=context,
-                    langgraph_thread="thread-123",
-                    slack_channel_id="C456",
-                    slack_thread_ts=None,
-                    slack_message_ts=None,
-                )
-            except Exception:
-                pass
+        stream_mock = MagicMock(side_effect=empty_stream)
+        slack_bot_streaming.handler.langgraph_client.runs.stream = stream_mock
 
-        # We can't easily assert this was called due to async nature,
-        # but we're testing it at integration level with the real handler
+        event = {
+            "user": "U123",
+            "channel": "C456",
+            "channel_type": "channel",
+            "ts": "1234567890.123456",
+            "text": "Hello bot",
+        }
+        context = MessageContext(event)
+
+        await slack_bot_streaming.handler._stream_from_langgraph_to_slack(
+            message="Hello",
+            langgraph_thread="thread-123",
+            slack_channel="C456",
+            slack_stream_ts="111.222",
+            context=context,
+            slack_thread_ts=None,
+        )
+
+        mock_builder.assert_awaited_once_with(context)
+        assert stream_mock.call_args.kwargs["config"] == expected_config
 
     @pytest.mark.asyncio
     async def test_config_builder_called_in_message_handler(
         self, slack_bot_nonstreaming
     ):
         """config_builder should be called when processing messages in non-streaming mode."""
-        builder_called = False
-
-        async def mock_builder(context):
-            nonlocal builder_called
-            builder_called = True
-            return None
-
+        expected_config = {"configurable": {"repo": "message-repo"}}
+        mock_builder = AsyncMock(return_value=expected_config)
         slack_bot_nonstreaming.handler.config_builder = mock_builder
+        slack_bot_nonstreaming.handler.client.runs.create = AsyncMock(
+            return_value={"run_id": "run-123"}
+        )
+        slack_bot_nonstreaming.handler.client.runs.join = AsyncMock(
+            return_value={"messages": []}
+        )
 
-        # Mock the LangGraph client
-        with patch.object(slack_bot_nonstreaming.handler.client.runs, "create", new_callable=AsyncMock):
-            event = {
-                "user": "U123",
-                "channel": "C456",
-                "channel_type": "channel",
-                "ts": "1234567890.123456",
-                "text": "Hello bot",
-            }
-            context = MessageContext(event)
+        event = {
+            "user": "U123",
+            "channel": "C456",
+            "channel_type": "channel",
+            "ts": "1234567890.123456",
+            "text": "Hello bot",
+        }
+        context = MessageContext(event)
 
-            try:
-                # This will fail but we just need to trigger config_builder
-                await slack_bot_nonstreaming.handler._invoke_langgraph(
-                    message="Hello",
-                    thread_id="thread-123",
-                    context=context,
-                )
-            except Exception:
-                pass
+        await slack_bot_nonstreaming.handler._invoke_langgraph(
+            message="Hello",
+            thread_id="thread-123",
+            context=context,
+        )
 
-        # We can't easily assert this was called due to async nature,
-        # but we're testing it at integration level with the real handler
+        mock_builder.assert_awaited_once_with(context)
+        create_kwargs = slack_bot_nonstreaming.handler.client.runs.create.await_args.kwargs
+        assert create_kwargs["config"] == expected_config
 
 
 class TestConfigBuilderIntegration:
