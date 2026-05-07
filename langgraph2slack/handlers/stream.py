@@ -6,13 +6,13 @@ forwarded to Slack as they arrive, minimizing latency.
 
 import asyncio
 import logging
-import re
 import time
 from typing import Optional
 
 from ..config import MessageContext
-from ..transformers import TransformerChain
+from ..mixins import ReactionMixin
 from ..tool_calls import ToolCallTracker
+from ..transformers import TransformerChain
 from ..utils import (
     clean_markdown,
     create_markdown_text_block,
@@ -21,7 +21,6 @@ from ..utils import (
     create_tool_details_button,
     replace_markdown_images_with_links,
 )
-from ..mixins import ReactionMixin
 from .base import BaseHandler
 
 logger = logging.getLogger(__name__)
@@ -590,6 +589,7 @@ class StreamingHandler(BaseHandler):
                         # as a full message (not streaming chunks). This is the typical pattern
                         # with create_react_agent / create_agent.
                         import json as _json
+
                         tool_calls = message_data.get("tool_calls", [])
                         if tool_calls:
                             logger.info(
@@ -651,9 +651,7 @@ class StreamingHandler(BaseHandler):
                         tracker.handle_result(tool_call_id, str(result))
 
                         if plan_ts:
-                            await self._update_plan_block(
-                                slack_channel, plan_ts, tracker, run_id
-                            )
+                            await self._update_plan_block(slack_channel, plan_ts, tracker, run_id)
                         else:
                             # Plan block was never posted — post it now retroactively.
                             # This handles the case where the tool call start event was
@@ -738,7 +736,7 @@ class StreamingHandler(BaseHandler):
             try:
                 if buffer:
                     await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
-            except:
+            except Exception:
                 pass  # Best effort
 
             # Try to append error message to stream
@@ -748,7 +746,7 @@ class StreamingHandler(BaseHandler):
                     stream_ts=slack_stream_ts,
                     content="\n\n_Error: Unable to complete response_",
                 )
-            except:
+            except Exception:
                 pass  # Best effort
 
         # Apply output transformers to the accumulated text response.
@@ -911,9 +909,7 @@ class StreamingHandler(BaseHandler):
 
         accepted_image_blocks = []
         for image_block in image_blocks:
-            candidate_blocks = (
-                [text_block] + accepted_image_blocks + [image_block] + footer_blocks
-            )
+            candidate_blocks = [text_block] + accepted_image_blocks + [image_block] + footer_blocks
             try:
                 await self.slack_client.client.chat_update(
                     channel=channel_id,
@@ -922,10 +918,7 @@ class StreamingHandler(BaseHandler):
                     blocks=candidate_blocks,
                 )
                 accepted_image_blocks.append(image_block)
-                logger.info(
-                    "Accepted image block: "
-                    f"{image_block.get('image_url')}"
-                )
+                logger.info("Accepted image block: " f"{image_block.get('image_url')}")
             except Exception as image_error:
                 if _is_image_block_error(image_error):
                     logger.warning(
@@ -1070,18 +1063,14 @@ class StreamingHandler(BaseHandler):
 
                     # Keep image source URLs visible in the text while also
                     # rendering Slack image blocks below it.
-                    text_with_image_links = replace_markdown_images_with_links(
-                        display_text
-                    )
+                    text_with_image_links = replace_markdown_images_with_links(display_text)
                     slack_text = clean_markdown(text_with_image_links, for_blocks=True)
 
                     # Prepend a standard Markdown block so Slack preserves headings,
                     # tables, task lists, dividers, and other Markdown constructs.
                     text_block = create_markdown_text_block(text_with_image_links)
                     image_blocks = [b for b in blocks if b.get("type") == "image"]
-                    feedback_thread_blocks = [
-                        b for b in blocks if b.get("type") != "image"
-                    ]
+                    feedback_thread_blocks = [b for b in blocks if b.get("type") != "image"]
 
                     await self._update_message_with_incremental_images(
                         channel_id,

@@ -200,7 +200,9 @@ class BaseHandler:
                 return content
             if isinstance(content, list):
                 return "".join(
-                    b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+                    b.get("text", "")
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
                 )
             return str(content)
         except Exception:

@@ -2,6 +2,7 @@
 
 import re
 from typing import Optional
+
 from ..utils import clean_markdown
 
 
@@ -17,8 +18,8 @@ def _parse_markdown_table(text: str) -> tuple[Optional[list], Optional[list], st
         no table is found.
     """
     pattern = re.compile(
-        r"(\|[^\n]+\|\n?)"        # header row
-        r"\|[-| :]+\|\n?"         # separator row (---|---)
+        r"(\|[^\n]+\|\n?)"  # header row
+        r"\|[-| :]+\|\n?"  # separator row (---|---)
         r"((?:\|[^\n]+\|\n?)+)",  # data rows (one or more)
     )
     match = pattern.search(text)
@@ -105,17 +106,21 @@ async def render_tables(response: str) -> "str | list[dict]":
     blocks = []
 
     if before:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
+            }
+        )
 
     blocks.append(_build_slack_table_block(headers, rows))
 
     if after:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
+            }
+        )
 
     return blocks

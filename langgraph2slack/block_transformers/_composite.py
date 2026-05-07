@@ -7,17 +7,18 @@ patterns is preserved as mrkdwn section blocks.
 
 import logging
 import re
+
 from ..utils import clean_markdown
-from ._tables import _parse_markdown_table, _build_slack_table_block
-from ._todos import _TODO_BLOCK_RE, _parse_todo_items, _build_slack_todo_block
 from ._code import _CODE_FENCE_RE, _build_slack_code_block
+from ._tables import _build_slack_table_block, _parse_markdown_table
+from ._todos import _TODO_BLOCK_RE, _build_slack_todo_block, _parse_todo_items
 
 logger = logging.getLogger(__name__)
 
 # Markdown table: header row, separator, one or more data rows
 _TABLE_RE = re.compile(
-    r"(\|[^\n]+\|\n?)"        # header row
-    r"\|[-| :]+\|\n?"         # separator row
+    r"(\|[^\n]+\|\n?)"  # header row
+    r"\|[-| :]+\|\n?"  # separator row
     r"((?:\|[^\n]+\|\n?)+)",  # data rows
 )
 
@@ -91,10 +92,12 @@ async def render_blocks(response: str) -> "str | list[dict]":
         # Text before this pattern
         before = response[cursor:start].strip()
         if before:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
-            })
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
+                }
+            )
 
         # Render the matched pattern
         if kind == "table":
@@ -105,10 +108,12 @@ async def render_blocks(response: str) -> "str | list[dict]":
                     table_rendered = True
                 else:
                     # Slack only allows one table block per message; leave extra tables as mrkdwn
-                    blocks.append({
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": match.group()},
-                    })
+                    blocks.append(
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": match.group()},
+                        }
+                    )
         elif kind == "todo":
             sections = _parse_todo_items(match.group())
             if sections:
@@ -122,9 +127,11 @@ async def render_blocks(response: str) -> "str | list[dict]":
     # Trailing text after the last pattern
     after = response[cursor:].strip()
     if after:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
+            }
+        )
 
     return blocks

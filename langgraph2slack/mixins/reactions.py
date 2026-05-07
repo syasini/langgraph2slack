@@ -4,8 +4,8 @@ This mixin provides shared reaction functionality to avoid code duplication
 between SlackBot and StreamingHandler.
 """
 
-import logging
 import asyncio
+import logging
 
 logger = logging.getLogger(__name__)
 

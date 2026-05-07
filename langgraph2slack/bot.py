@@ -26,7 +26,6 @@ from .utils import (
     create_feedback_modal,
     create_markdown_text_block,
     create_mrkdwn_text_block,
-    create_plan_block,
     extract_feedback_text,
     is_bot_mention,
     is_dm,
@@ -523,9 +522,7 @@ class SlackBot:
         """
         # Validate stream_buffer_time
         if stream_buffer_time <= 0:
-            raise ValueError(
-                f"stream_buffer_time must be positive, got {stream_buffer_time}"
-            )
+            raise ValueError(f"stream_buffer_time must be positive, got {stream_buffer_time}")
         if stream_buffer_time > 5.0:
             logger.warning(
                 f"stream_buffer_time={stream_buffer_time}s is very high. "
@@ -575,7 +572,9 @@ class SlackBot:
             ValueError: If required field is missing or invalid type
         """
         if not isinstance(reaction, dict):
-            raise ValueError(f"Reaction config at index {index} must be a dict, got {type(reaction)}")
+            raise ValueError(
+                f"Reaction config at index {index} must be a dict, got {type(reaction)}"
+            )
 
         emoji = reaction.get("emoji")
         target = reaction.get("target")
@@ -913,8 +912,8 @@ class SlackBot:
                                 )
 
                     logger.info("Non-streaming mode: calling handler.process_message")
-                    response_text, blocks, thread_id, run_id, has_custom_blocks = await self.handler.process_message(
-                        message_text, context
+                    response_text, blocks, thread_id, run_id, has_custom_blocks = (
+                        await self.handler.process_message(message_text, context)
                     )
                     logger.info(
                         f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}, has_custom_blocks={has_custom_blocks}"
@@ -926,9 +925,7 @@ class SlackBot:
 
                     # Detect multi-message response: transformer returned list[list[dict]]
                     is_multi_message = (
-                        has_custom_blocks
-                        and bool(blocks)
-                        and isinstance(blocks[0], list)
+                        has_custom_blocks and bool(blocks) and isinstance(blocks[0], list)
                     )
 
                     if is_multi_message:

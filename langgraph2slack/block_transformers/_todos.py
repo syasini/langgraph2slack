@@ -11,6 +11,7 @@ Supported input formats:
 """
 
 import re
+
 from ..utils import clean_markdown
 
 # Matches a run of one or more consecutive todo lines.
@@ -57,10 +58,12 @@ def _parse_todo_items(match_text: str) -> list[dict]:
         if checked:
             text_element["style"] = {"strike": True}
 
-        sections.append({
-            "type": "rich_text_section",
-            "elements": [text_element],
-        })
+        sections.append(
+            {
+                "type": "rich_text_section",
+                "elements": [text_element],
+            }
+        )
 
     return sections
 
@@ -113,10 +116,12 @@ async def render_todo_lists(response: str) -> "str | list[dict]":
         # Text before this todo block
         before = response[last_end : match.start()].strip()
         if before:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
-            })
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
+                }
+            )
 
         # The todo block itself
         sections = _parse_todo_items(match.group())
@@ -128,9 +133,11 @@ async def render_todo_lists(response: str) -> "str | list[dict]":
     # Trailing text after the last todo block
     after = response[last_end:].strip()
     if after:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
+            }
+        )
 
     return blocks

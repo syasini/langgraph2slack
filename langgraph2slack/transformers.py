@@ -198,8 +198,7 @@ class DictTransformerChain:
                 result = previous
             elif not isinstance(result, dict):
                 raise TypeError(
-                    f"Transformer '{func_name}' returned {type(result).__name__}, "
-                    f"expected dict"
+                    f"Transformer '{func_name}' returned {type(result).__name__}, " f"expected dict"
                 )
 
         return result

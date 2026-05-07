@@ -141,6 +141,7 @@ def replace_markdown_images_with_links(text: str) -> str:
     only the alt text. For image-block fallbacks, keep the URL visible so a
     failed image download does not make the source disappear from the message.
     """
+
     def _replace(match: re.Match) -> str:
         alt_text = match.group(1).strip()
         url = match.group(2)

@@ -162,6 +162,7 @@ class MessageHandler(BaseHandler):
                 # Append feedback blocks to the last chunk only so they appear once
                 # at the end, not mixed into every sub-message.
                 from ..utils import create_feedback_block
+
                 feedback_blocks = create_feedback_block(
                     thread_id=langgraph_thread,
                     show_feedback_buttons=self.show_feedback_buttons,
@@ -169,16 +170,14 @@ class MessageHandler(BaseHandler):
                 )
                 messages = [list(chunk) for chunk in transformed_output]
                 messages[-1] = messages[-1] + feedback_blocks
-                logger.info(
-                    f"Output transformer returned {len(messages)}-message payload"
-                )
+                logger.info(f"Output transformer returned {len(messages)}-message payload")
                 return slack_formatted, messages, langgraph_thread, run_id, True
 
             # Single-message custom blocks — existing behaviour
-            blocks = self._create_blocks(fallback_text, langgraph_thread, custom_blocks=transformed_output)
-            logger.info(
-                f"Output transformer returned {len(transformed_output)} custom blocks"
+            blocks = self._create_blocks(
+                fallback_text, langgraph_thread, custom_blocks=transformed_output
             )
+            logger.info(f"Output transformer returned {len(transformed_output)} custom blocks")
             return slack_formatted, blocks, langgraph_thread, run_id, True
         else:
             # Transformer returned a string — standard text + image extraction path.
@@ -186,9 +185,7 @@ class MessageHandler(BaseHandler):
             blocks = self._create_blocks(transformed_output, langgraph_thread)
             return slack_formatted, blocks, langgraph_thread, run_id, False
 
-    def _extract_tool_calls_from_messages(
-        self, langgraph_response: dict
-    ) -> List[ActiveToolCall]:
+    def _extract_tool_calls_from_messages(self, langgraph_response: dict) -> List[ActiveToolCall]:
         """Extract tool calls and their results from a completed LangGraph run.
 
         Scans the full message list from the completed run to find:
@@ -212,9 +209,7 @@ class MessageHandler(BaseHandler):
                 tool_call_id = msg.get("tool_call_id", "")
                 content = msg.get("content", "")
                 if isinstance(content, list):
-                    content = " ".join(
-                        b.get("text", "") for b in content if isinstance(b, dict)
-                    )
+                    content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
                 if tool_call_id:
                     tool_results[tool_call_id] = str(content)
 
@@ -230,6 +225,7 @@ class MessageHandler(BaseHandler):
                 args = tc.get("args", {})
                 if isinstance(args, dict):
                     import json
+
                     args_str = json.dumps(args, indent=2)
                 else:
                     args_str = str(args)

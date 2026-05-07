@@ -6,6 +6,7 @@ Language identifiers are stripped (Slack doesn't support syntax highlighting).
 """
 
 import re
+
 from ..utils import clean_markdown
 
 # Matches a triple-backtick code fence, optionally with a language identifier.
@@ -60,10 +61,12 @@ async def render_code_blocks(response: str) -> "str | list[dict]":
         # Text before this code block
         before = response[last_end : match.start()].strip()
         if before:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
-            })
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": clean_markdown(before, for_blocks=True)},
+                }
+            )
 
         # The code block itself
         code = match.group("code")
@@ -74,9 +77,11 @@ async def render_code_blocks(response: str) -> "str | list[dict]":
     # Trailing text after the last code block
     after = response[last_end:].strip()
     if after:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": clean_markdown(after, for_blocks=True)},
+            }
+        )
 
     return blocks
