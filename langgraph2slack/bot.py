@@ -22,7 +22,10 @@ from .mixins import ReactionMixin
 from .transformers import TransformerChain
 from .utils import (
     TOOL_CALL_DETAILS_ACTION_ID,
+    clean_markdown,
     create_feedback_modal,
+    create_markdown_text_block,
+    create_mrkdwn_text_block,
     create_plan_block,
     extract_feedback_text,
     is_bot_mention,
@@ -36,7 +39,8 @@ def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
     """Return a cleaned copy of blocks suitable for a retry after a known Slack API error.
 
     - ``only_one_table_allowed``: keeps only the first ``table`` block, drops the rest.
-    - ``downloading image`` / generic ``invalid_blocks``: strips all ``image`` blocks.
+    - ``downloading image`` / generic ``invalid_blocks``: strips all ``image`` blocks
+      and degrades ``markdown`` text blocks to legacy ``section``/``mrkdwn`` blocks.
 
     Returns the blocks unchanged if they appear to be a multi-message payload
     (list[list[dict]]) — that case is handled upstream by the ``is_multi_message`` path.
@@ -56,8 +60,18 @@ def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
             else:
                 cleaned.append(b)
         return cleaned
-    # Default: strip image blocks (e.g. image download failure)
-    return [b for b in blocks if b.get("type") != "image"]
+    # Default: strip image blocks (e.g. image download failure) and convert
+    # markdown blocks to legacy mrkdwn sections if Slack rejected the newer block.
+    cleaned = []
+    for b in blocks:
+        if b.get("type") == "image":
+            continue
+        if b.get("type") == "markdown":
+            text = clean_markdown(b.get("text", ""), for_blocks=True)
+            cleaned.append(create_mrkdwn_text_block(text))
+        else:
+            cleaned.append(b)
+    return cleaned
 
 
 class SlackBot:
@@ -705,12 +719,12 @@ class SlackBot:
         response_text: str,
         has_custom_blocks: bool,
     ) -> list:
-        """Prepend a text section to standard block layouts.
+        """Prepend a text block to standard block layouts.
 
         When a transformer returned custom blocks they already encode the full
         layout, so nothing is added. For the default image/feedback layout we
-        prepend the response text as a mrkdwn section so the text remains
-        visible alongside the blocks.
+        prepend the response text as a Slack markdown block so standard Markdown
+        remains visible alongside the blocks.
 
         Args:
             blocks: Block list returned by the handler.
@@ -721,10 +735,7 @@ class SlackBot:
             Final block list ready to send to Slack.
         """
         if blocks and not has_custom_blocks:
-            text_block = {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": response_text},
-            }
+            text_block = create_markdown_text_block(response_text)
             return [text_block] + blocks
         return blocks
 

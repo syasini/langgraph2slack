@@ -118,6 +118,23 @@ def clean_markdown(text: str, for_blocks: bool = False) -> str:
     return text
 
 
+def create_markdown_text_block(text: str) -> Dict:
+    """Create a Slack ``markdown`` block from standard Markdown text.
+
+    Slack's ``markdown`` block accepts standard Markdown and converts it to
+    native Block Kit structures (headers, tables, rich text, dividers, etc.).
+    """
+    return {"type": "markdown", "text": text if text.strip() else " "}
+
+
+def create_mrkdwn_text_block(text: str) -> Dict:
+    """Create a legacy ``section`` block with Slack ``mrkdwn`` text."""
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": text if text.strip() else " "},
+    }
+
+
 def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
     """Extract markdown images and return Slack image blocks.
 

@@ -13,7 +13,14 @@ from typing import Optional
 from ..config import MessageContext
 from ..transformers import TransformerChain
 from ..tool_calls import ToolCallTracker
-from ..utils import clean_markdown, create_plan_block, create_tool_details_button, remove_markdown_images
+from ..utils import (
+    clean_markdown,
+    create_markdown_text_block,
+    create_mrkdwn_text_block,
+    create_plan_block,
+    create_tool_details_button,
+    remove_markdown_images,
+)
 from ..mixins import ReactionMixin
 from .base import BaseHandler
 
@@ -855,7 +862,7 @@ class StreamingHandler(BaseHandler):
                 show_feedback_buttons=self.show_feedback_buttons,
                 show_thread_id=self.show_thread_id,
             )
-            text_block = {"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}
+            text_block = create_mrkdwn_text_block(fallback_text)
             fallback_blocks = [text_block] + feedback_only_blocks
 
             try:
@@ -1001,8 +1008,9 @@ class StreamingHandler(BaseHandler):
                     text_without_images = remove_markdown_images(display_text)
                     slack_text = clean_markdown(text_without_images, for_blocks=True)
 
-                    # Prepend text block to preserve streamed content alongside images + feedback
-                    text_block = {"type": "section", "text": {"type": "mrkdwn", "text": slack_text}}
+                    # Prepend a standard Markdown block so Slack preserves headings,
+                    # tables, task lists, dividers, and other Markdown constructs.
+                    text_block = create_markdown_text_block(text_without_images)
                     all_blocks = [text_block] + blocks
 
                     await self._update_message_with_fallback(

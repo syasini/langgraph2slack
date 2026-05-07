@@ -711,6 +711,42 @@ class TestStopSlackStream:
         call_kwargs = basic_streaming_handler.slack_client.client.chat_update.call_args.kwargs
         assert "blocks" in call_kwargs
         assert len(call_kwargs["blocks"]) > 0
+        assert call_kwargs["blocks"][0] == {
+            "type": "markdown",
+            "text": "Hello world",
+        }
+
+    @pytest.mark.asyncio
+    async def test_stop_stream_preserves_standard_markdown_in_markdown_block(
+        self, basic_streaming_handler
+    ):
+        """Final update should preserve standard Markdown for Slack's markdown block."""
+        response = """# Plant Summary
+
+## Care Table
+
+| Plant | Water |
+| --- | --- |
+| Pothos | Weekly |
+
+- [x] Keep headers
+- [ ] Keep task lists
+"""
+
+        await basic_streaming_handler._stop_slack_stream(
+            channel_id="C123",
+            stream_ts="1234567.890",
+            complete_response=response,
+            thread_id="thread-123"
+        )
+
+        call_kwargs = basic_streaming_handler.slack_client.client.chat_update.call_args.kwargs
+        text_block = call_kwargs["blocks"][0]
+        assert text_block["type"] == "markdown"
+        assert text_block["text"] == response
+        assert "# Plant Summary" in text_block["text"]
+        assert "| Plant | Water |" in text_block["text"]
+        assert "- [x] Keep headers" in text_block["text"]
 
     @pytest.mark.asyncio
     async def test_stop_stream_removes_image_markdown(self, basic_streaming_handler):
@@ -730,6 +766,9 @@ class TestStopSlackStream:
         # Image markdown should be removed from text
         assert "![Chart]" not in call_kwargs["text"]
         assert "Cool!" in call_kwargs["text"]
+        assert call_kwargs["blocks"][0]["type"] == "markdown"
+        assert "![Chart]" not in call_kwargs["blocks"][0]["text"]
+        assert any(b.get("type") == "image" for b in call_kwargs["blocks"])
 
     @pytest.mark.asyncio
     async def test_stop_stream_update_fails_falls_back_to_feedback_only(
@@ -759,6 +798,11 @@ class TestStopSlackStream:
 
         # Should have called update twice (first fails, second succeeds)
         assert mock_slack_client.client.chat_update.call_count == 2
+        first_call = mock_slack_client.client.chat_update.call_args_list[0].kwargs
+        fallback_call = mock_slack_client.client.chat_update.call_args_list[1].kwargs
+        assert first_call["blocks"][0]["type"] == "markdown"
+        assert fallback_call["blocks"][0]["type"] == "section"
+        assert fallback_call["blocks"][0]["text"]["type"] == "mrkdwn"
 
     @pytest.mark.asyncio
     async def test_stop_stream_fallback_also_fails(self, basic_streaming_handler, mock_slack_client):
