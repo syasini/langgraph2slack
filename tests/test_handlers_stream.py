@@ -19,6 +19,25 @@ from langgraph2slack.transformers import TransformerChain
 from langgraph2slack.config import MessageContext
 
 
+def _image_urls(blocks):
+    return [b.get("image_url") for b in blocks if b.get("type") == "image"]
+
+
+def _has_feedback_and_thread_blocks(blocks):
+    return any(b.get("type") == "context_actions" for b in blocks) and any(
+        b.get("type") == "context"
+        and any("Thread ID" in e.get("text", "") for e in b.get("elements", []))
+        for b in blocks
+    )
+
+
+def _assert_visible_image_links(blocks, *expected_fragments):
+    assert blocks[0]["type"] == "markdown"
+    assert "![" not in blocks[0]["text"]
+    for fragment in expected_fragments:
+        assert fragment in blocks[0]["text"]
+
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -760,29 +779,38 @@ class TestStopSlackStream:
             thread_id="thread-123"
         )
 
-        # Get the text that was sent to chat_update
+        assert basic_streaming_handler.slack_client.client.chat_update.call_count == 2
+
+        base_call = basic_streaming_handler.slack_client.client.chat_update.call_args_list[0].kwargs
         call_kwargs = basic_streaming_handler.slack_client.client.chat_update.call_args.kwargs
+
+        assert _image_urls(base_call["blocks"]) == []
+        assert _has_feedback_and_thread_blocks(base_call["blocks"])
 
         # Image markdown should become visible URL text, with image block retained.
         assert "![Chart]" not in call_kwargs["text"]
         assert "Chart: https://example.com/chart.png" in call_kwargs["text"]
         assert "Cool!" in call_kwargs["text"]
-        assert call_kwargs["blocks"][0]["type"] == "markdown"
-        assert "![Chart]" not in call_kwargs["blocks"][0]["text"]
-        assert "Chart: https://example.com/chart.png" in call_kwargs["blocks"][0]["text"]
-        assert any(b.get("type") == "image" for b in call_kwargs["blocks"])
+        _assert_visible_image_links(
+            call_kwargs["blocks"], "Chart: https://example.com/chart.png"
+        )
+        assert _image_urls(call_kwargs["blocks"]) == ["https://example.com/chart.png"]
+        assert _has_feedback_and_thread_blocks(call_kwargs["blocks"])
 
     @pytest.mark.asyncio
-    async def test_stop_stream_image_download_fallback_preserves_image_url(
+    async def test_stop_stream_skips_failed_image_and_keeps_later_images(
         self, basic_streaming_handler, mock_slack_client
     ):
-        """If Slack rejects an image block, fallback text should keep the image URL."""
-        response_with_image = "Check this: ![Chart](https://example.com/chart.png) Cool!"
-        call_count = [0]
+        """If one image fails, later accepted images should remain in the message."""
+        bad_url = "https://example.com/bad.png"
+        good_url = "https://example.com/good.png"
+        response_with_image = (
+            f"Bad: ![Bad]({bad_url})\n\n"
+            f"Good: ![Good]({good_url})"
+        )
 
         async def update_with_image_failure(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
+            if bad_url in _image_urls(kwargs["blocks"]):
                 raise Exception(
                     "invalid_blocks: downloading image failed "
                     "[json-pointer:/blocks/1/image_url]"
@@ -798,19 +826,89 @@ class TestStopSlackStream:
             thread_id="thread-123"
         )
 
+        assert mock_slack_client.client.chat_update.call_count == 3
+        base_call = mock_slack_client.client.chat_update.call_args_list[0].kwargs
+        bad_image_call = mock_slack_client.client.chat_update.call_args_list[1].kwargs
+        final_call = mock_slack_client.client.chat_update.call_args_list[2].kwargs
+
+        assert _image_urls(base_call["blocks"]) == []
+        assert _has_feedback_and_thread_blocks(base_call["blocks"])
+        assert _image_urls(bad_image_call["blocks"]) == [bad_url]
+
+        _assert_visible_image_links(final_call["blocks"], bad_url, good_url)
+        assert _image_urls(final_call["blocks"]) == [good_url]
+        assert _has_feedback_and_thread_blocks(final_call["blocks"])
+
+    @pytest.mark.asyncio
+    async def test_stop_stream_all_images_fail_keeps_base_with_feedback(
+        self, basic_streaming_handler, mock_slack_client
+    ):
+        """If all images fail, the base text and feedback/thread blocks should remain."""
+        response_with_images = (
+            "One: ![One](https://example.com/one.png)\n"
+            "Two: ![Two](https://example.com/two.png)"
+        )
+        successful_blocks = []
+
+        async def fail_any_image(*args, **kwargs):
+            if _image_urls(kwargs["blocks"]):
+                raise Exception(
+                    "invalid_blocks: downloading image failed "
+                    "[json-pointer:/blocks/1/image_url]"
+                )
+            successful_blocks.append(kwargs["blocks"])
+            return {"ok": True}
+
+        mock_slack_client.client.chat_update = AsyncMock(side_effect=fail_any_image)
+
+        await basic_streaming_handler._stop_slack_stream(
+            channel_id="C123",
+            stream_ts="1234567.890",
+            complete_response=response_with_images,
+            thread_id="thread-123"
+        )
+
+        assert mock_slack_client.client.chat_update.call_count == 3
+        assert len(successful_blocks) == 1
+        assert _image_urls(successful_blocks[-1]) == []
+        _assert_visible_image_links(
+            successful_blocks[-1],
+            "https://example.com/one.png",
+            "https://example.com/two.png",
+        )
+        assert _has_feedback_and_thread_blocks(successful_blocks[-1])
+
+    @pytest.mark.asyncio
+    async def test_stop_stream_unexpected_image_update_error_restores_feedback(
+        self, basic_streaming_handler, mock_slack_client
+    ):
+        """Unexpected image-loop failures should leave a safe message with feedback."""
+        response_with_image = "Check this: ![Chart](https://example.com/chart.png)"
+        successful_blocks = []
+
+        async def fail_image_with_unexpected_error(*args, **kwargs):
+            if _image_urls(kwargs["blocks"]):
+                raise Exception("ratelimited")
+            successful_blocks.append(kwargs["blocks"])
+            return {"ok": True}
+
+        mock_slack_client.client.chat_update = AsyncMock(
+            side_effect=fail_image_with_unexpected_error
+        )
+
+        await basic_streaming_handler._stop_slack_stream(
+            channel_id="C123",
+            stream_ts="1234567.890",
+            complete_response=response_with_image,
+            thread_id="thread-123"
+        )
+
         assert mock_slack_client.client.chat_update.call_count == 2
-        primary_call = mock_slack_client.client.chat_update.call_args_list[0].kwargs
-        fallback_call = mock_slack_client.client.chat_update.call_args_list[1].kwargs
-
-        assert primary_call["blocks"][0]["type"] == "markdown"
-        assert "![Chart]" not in primary_call["blocks"][0]["text"]
-        assert "https://example.com/chart.png" in primary_call["blocks"][0]["text"]
-        assert any(b.get("type") == "image" for b in primary_call["blocks"])
-
-        assert fallback_call["blocks"][0]["type"] == "markdown"
-        assert "https://example.com/chart.png" in fallback_call["blocks"][0]["text"]
-        assert "https://example.com/chart.png" in fallback_call["text"]
-        assert all(b.get("type") != "image" for b in fallback_call["blocks"])
+        assert _image_urls(successful_blocks[-1]) == []
+        _assert_visible_image_links(
+            successful_blocks[-1], "https://example.com/chart.png"
+        )
+        assert _has_feedback_and_thread_blocks(successful_blocks[-1])
 
     @pytest.mark.asyncio
     async def test_stop_stream_update_fails_falls_back_to_feedback_only(

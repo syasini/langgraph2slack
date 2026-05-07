@@ -254,6 +254,23 @@ class TestBuildMetadata:
         assert "slack_user_id" not in metadata
 
     @pytest.mark.asyncio
+    async def test_build_metadata_with_context_only_transformer(
+        self, minimal_bot, sample_context
+    ):
+        """Should support the documented single-argument context signature."""
+        @minimal_bot.transform_metadata
+        async def custom_metadata(context: MessageContext) -> dict:
+            return {
+                "custom_user": context.user_id,
+                "custom_channel": context.channel_id,
+            }
+
+        metadata = await minimal_bot._build_metadata(sample_context)
+
+        assert metadata["custom_user"] == "U123USER"
+        assert metadata["custom_channel"] == "C456CHANNEL"
+
+    @pytest.mark.asyncio
     async def test_build_metadata_multiple_transformers(self, minimal_bot, sample_context):
         """Multiple metadata transformers should be applied in order."""
         @minimal_bot.transform_metadata
@@ -274,6 +291,16 @@ class TestBuildMetadata:
         assert metadata["step"] == "second"  # Modified by second transformer
         assert metadata["user_id"] == "U123USER"  # From first transformer
         assert metadata["channel_id"] == "C456CHANNEL"  # Added by second transformer
+
+    @pytest.mark.asyncio
+    async def test_build_metadata_rejects_list_return(self, minimal_bot, sample_context):
+        """Metadata transformers should reject Slack block lists."""
+        @minimal_bot.transform_metadata
+        async def bad_metadata(data: dict, context: MessageContext) -> dict:
+            return [{"type": "section"}]
+
+        with pytest.raises(TypeError, match="expected dict"):
+            await minimal_bot._build_metadata(sample_context)
 
 
 # ============================================================================
@@ -461,4 +488,3 @@ class TestNonStreamingCustomBlocks:
         }
         assert all(b.get("type") != "image" for b in result)
         assert result[-1] == {"type": "context", "elements": []}
-

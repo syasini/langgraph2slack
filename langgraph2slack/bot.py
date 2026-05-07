@@ -19,7 +19,7 @@ from slack_bolt.async_app import AsyncApp
 from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
-from .transformers import TransformerChain
+from .transformers import DictTransformerChain, TransformerChain
 from .utils import (
     TOOL_CALL_DETAILS_ACTION_ID,
     clean_markdown,
@@ -233,8 +233,8 @@ class SlackBot:
         # Initialize transformer chains
         self._input_transformers = TransformerChain()
         self._output_transformers = TransformerChain()
-        self._metadata_transformers = TransformerChain()
-        self._config_transformers = TransformerChain()
+        self._metadata_transformers = DictTransformerChain()
+        self._config_transformers = DictTransformerChain()
 
         # Initialize LangSmith client for feedback
         self.langsmith_client = Client()

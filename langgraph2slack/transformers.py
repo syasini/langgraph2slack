@@ -26,6 +26,12 @@ TransformerFunc = Union[
     Callable[[TransformerInput], Awaitable[TransformerOutput]],
 ]
 
+DictTransformerFunc = Union[
+    Callable[[Dict[str, Any], MessageContext], Awaitable[Dict[str, Any]]],
+    Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]],
+    Callable[[MessageContext], Awaitable[Dict[str, Any]]],
+]
+
 
 class TransformerChain:
     """Manages a chain of transformers.
@@ -140,6 +146,76 @@ class TransformerChain:
                 break
 
         return result
+
+    def __len__(self) -> int:
+        """Get number of transformers in chain."""
+        return len(self._transformers)
+
+    def __bool__(self) -> bool:
+        """True if chain has at least one transformer."""
+        return len(self._transformers) > 0
+
+
+class DictTransformerChain:
+    """Manages a chain of dict-to-dict transformers.
+
+    Used for metadata/config transformers, which should never inherit the
+    string-output chain's Slack-block short-circuit behavior.
+    """
+
+    def __init__(self):
+        """Initialize empty dict transformer chain."""
+        self._transformers: List[DictTransformerFunc] = []
+
+    def add(self, transformer: DictTransformerFunc) -> DictTransformerFunc:
+        """Add a dict transformer to the chain."""
+        self._transformers.append(transformer)
+        return transformer
+
+    async def apply(self, data: Dict[str, Any], context: MessageContext) -> Dict[str, Any]:
+        """Apply all dict transformers in order."""
+        result = data
+
+        for transformer in self._transformers:
+            previous = result
+            func_name = getattr(transformer, "__name__", repr(transformer))
+
+            sig = inspect.signature(transformer)
+            param_count = len(sig.parameters)
+
+            if param_count >= 2:
+                result = await transformer(result, context)
+            elif self._single_parameter_is_context(sig):
+                result = await transformer(context)
+            else:
+                result = await transformer(result)
+
+            if result is None:
+                logger.warning(
+                    f"Transformer '{func_name}' returned None (missing return statement?), "
+                    f"keeping previous value"
+                )
+                result = previous
+            elif not isinstance(result, dict):
+                raise TypeError(
+                    f"Transformer '{func_name}' returned {type(result).__name__}, "
+                    f"expected dict"
+                )
+
+        return result
+
+    @staticmethod
+    def _single_parameter_is_context(sig: inspect.Signature) -> bool:
+        """Return True for documented one-argument ``context`` transformers."""
+        if len(sig.parameters) != 1:
+            return False
+
+        param = next(iter(sig.parameters.values()))
+        annotation = param.annotation
+        annotation_name = getattr(annotation, "__name__", annotation)
+        return param.name in {"context", "ctx", "message_context"} or (
+            annotation_name == "MessageContext"
+        )
 
     def __len__(self) -> int:
         """Get number of transformers in chain."""
