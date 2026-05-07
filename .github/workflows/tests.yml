@@ -28,7 +28,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]" pytest-mock pytest-cov
+        run: uv pip install -e ".[dev]" pytest-mock pytest-cov
 
       - name: Run tests
         run: uv run pytest tests/ -v --cov=langgraph2slack --cov-report=term-missing
