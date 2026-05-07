@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- `@bot.transform_config` decorator to inject per-run agent configuration — mirrors `@bot.transform_metadata` but passes config to `get_config()` in LangGraph agents, enabling runtime injection of repo names, auth tokens, feature flags, etc.
+- `_update_message_with_incremental_images` in `StreamingHandler` — adds image blocks one at a time so a single bad image URL doesn't break the entire update
+- GitHub Actions CI workflow (`.github/workflows/tests.yml`) — runs pytest + ruff + black on all PRs and pushes to main, matrix across Python 3.11 and 3.12
+
+### Changed
+- Final message rendering now uses Slack markdown blocks (`mrkdwn`) instead of plain text, improving formatting fidelity
+- Image URLs in streamed responses are preserved in the rendered text (not stripped after extraction)
+- Simplified `_update_message_with_fallback` by removing redundant image fallback tier — incremental strategy handles failures per-image instead
+- Ruff config migrated to `[tool.ruff.lint]` section; `E501` ignored (black handles line length)
+
+### Fixed
+- Bare `except:` clauses in `StreamingHandler` replaced with `except Exception:` (E722)
+- Unsorted imports across `block_transformers/` modules
 
 ## [0.5.0] - 2026-02-26
 ### Added
