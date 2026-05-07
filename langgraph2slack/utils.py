@@ -135,6 +135,25 @@ def create_mrkdwn_text_block(text: str) -> Dict:
     }
 
 
+def replace_markdown_images_with_links(text: str) -> str:
+    """Replace Markdown image references with visible link text.
+
+    Slack's ``markdown`` block translates ``![alt](url)`` to a hyperlink using
+    only the alt text. For image-block fallbacks, keep the URL visible so a
+    failed image download does not make the source disappear from the message.
+    """
+    url_pattern = r"(?:[^()]|\([^()]*\))+"
+
+    def _replace(match: re.Match) -> str:
+        alt_text = match.group(1).strip()
+        url = match.group(2)
+        if alt_text:
+            return f"{alt_text}: {url}"
+        return url
+
+    return re.sub(rf"!\[([^\]]*)\]\(({url_pattern})\)", _replace, text)
+
+
 def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
     """Extract markdown images and return Slack image blocks.
 

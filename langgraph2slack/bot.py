@@ -30,6 +30,7 @@ from .utils import (
     extract_feedback_text,
     is_bot_mention,
     is_dm,
+    replace_markdown_images_with_links,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,21 @@ def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
             else:
                 cleaned.append(b)
         return cleaned
+    if "downloading image" in error_str:
+        cleaned = []
+        for b in blocks:
+            if b.get("type") == "image":
+                continue
+            if b.get("type") == "markdown":
+                cleaned.append(
+                    {
+                        **b,
+                        "text": replace_markdown_images_with_links(b.get("text", "")),
+                    }
+                )
+            else:
+                cleaned.append(b)
+        return cleaned
     # Default: strip image blocks (e.g. image download failure) and convert
     # markdown blocks to legacy mrkdwn sections if Slack rejected the newer block.
     cleaned = []
@@ -67,7 +83,10 @@ def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
         if b.get("type") == "image":
             continue
         if b.get("type") == "markdown":
-            text = clean_markdown(b.get("text", ""), for_blocks=True)
+            text = clean_markdown(
+                replace_markdown_images_with_links(b.get("text", "")),
+                for_blocks=True,
+            )
             cleaned.append(create_mrkdwn_text_block(text))
         else:
             cleaned.append(b)

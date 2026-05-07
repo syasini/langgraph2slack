@@ -19,7 +19,7 @@ from ..utils import (
     create_mrkdwn_text_block,
     create_plan_block,
     create_tool_details_button,
-    remove_markdown_images,
+    replace_markdown_images_with_links,
 )
 from ..mixins import ReactionMixin
 from .base import BaseHandler
@@ -830,6 +830,8 @@ class StreamingHandler(BaseHandler):
         primary_blocks: list,
         fallback_text: str,
         thread_id: str = None,
+        image_fallback_blocks: Optional[list] = None,
+        image_fallback_text: Optional[str] = None,
     ) -> None:
         """Try chat_update with primary blocks; on failure, degrade to text + feedback only.
 
@@ -842,6 +844,8 @@ class StreamingHandler(BaseHandler):
             primary_blocks: Blocks to attempt first (custom blocks or text + images + feedback)
             fallback_text: Notification/fallback text (mrkdwn-formatted)
             thread_id: LangGraph thread ID for feedback footer
+            image_fallback_blocks: Blocks to use when Slack rejects an image download
+            image_fallback_text: Notification text for the image-download fallback
         """
         try:
             await self.slack_client.client.chat_update(
@@ -853,6 +857,26 @@ class StreamingHandler(BaseHandler):
             logger.info(f"Updated message with {len(primary_blocks)} blocks")
         except Exception as block_error:
             logger.warning(f"Failed to update with primary blocks: {block_error}")
+            error_str = str(block_error)
+
+            if image_fallback_blocks is not None and "downloading image" in error_str:
+                retry_text = image_fallback_text or fallback_text
+                try:
+                    await self.slack_client.client.chat_update(
+                        channel=channel_id,
+                        ts=stream_ts,
+                        text=retry_text,
+                        blocks=image_fallback_blocks,
+                    )
+                    logger.info("Image fallback succeeded: sent text with image links and feedback")
+                    return
+                except Exception as image_fallback_error:
+                    fallback_text = retry_text
+                    logger.warning(
+                        f"Image fallback failed, retrying legacy text fallback: "
+                        f"{image_fallback_error}"
+                    )
+
             logger.debug("Retrying with text + feedback blocks only")
 
             from ..utils import create_feedback_block
@@ -1004,17 +1028,30 @@ class StreamingHandler(BaseHandler):
                 if blocks:
                     await asyncio.sleep(0.5)
 
-                    # Remove image markdown from text (shown as image blocks instead)
-                    text_without_images = remove_markdown_images(display_text)
-                    slack_text = clean_markdown(text_without_images, for_blocks=True)
+                    # Keep image source URLs visible in the text while also
+                    # rendering Slack image blocks below it.
+                    text_with_image_links = replace_markdown_images_with_links(
+                        display_text
+                    )
+                    slack_text = clean_markdown(text_with_image_links, for_blocks=True)
 
                     # Prepend a standard Markdown block so Slack preserves headings,
                     # tables, task lists, dividers, and other Markdown constructs.
-                    text_block = create_markdown_text_block(text_without_images)
+                    text_block = create_markdown_text_block(text_with_image_links)
                     all_blocks = [text_block] + blocks
+                    non_image_blocks = [b for b in blocks if b.get("type") != "image"]
+                    image_fallback_blocks = [
+                        create_markdown_text_block(text_with_image_links)
+                    ] + non_image_blocks
 
                     await self._update_message_with_fallback(
-                        channel_id, stream_ts, all_blocks, slack_text, thread_id
+                        channel_id,
+                        stream_ts,
+                        all_blocks,
+                        slack_text,
+                        thread_id,
+                        image_fallback_blocks=image_fallback_blocks,
+                        image_fallback_text=slack_text,
                     )
 
         except Exception as e:

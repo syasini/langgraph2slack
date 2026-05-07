@@ -441,3 +441,24 @@ class TestNonStreamingCustomBlocks:
         }
         assert all(b.get("type") != "image" for b in result)
         assert result[-1] == {"type": "context", "elements": []}
+
+    def test_retry_cleaning_for_image_download_preserves_markdown_with_visible_url(self):
+        """Image download retries should remove image blocks but keep image URLs in text."""
+        blocks = [
+            {
+                "type": "markdown",
+                "text": "Look: ![Plant](https://example.com/plant.png)",
+            },
+            {"type": "image", "image_url": "https://example.com/plant.png", "alt_text": "Plant"},
+            {"type": "context", "elements": []},
+        ]
+
+        result = _clean_blocks_for_retry(blocks, "invalid_blocks downloading image failed")
+
+        assert result[0] == {
+            "type": "markdown",
+            "text": "Look: Plant: https://example.com/plant.png",
+        }
+        assert all(b.get("type") != "image" for b in result)
+        assert result[-1] == {"type": "context", "elements": []}
+
