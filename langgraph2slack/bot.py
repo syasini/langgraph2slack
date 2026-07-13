@@ -362,6 +362,78 @@ class SlackBot:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             logger.info("All background tasks cancelled")
 
+    async def send_proactive_message(
+        self,
+        channel: str,
+        text: str,
+        thread_ts: str | None = None,
+    ) -> str:
+        """Send a Slack message and pre-populate the LangGraph thread with it as context.
+
+        When a bot sends a proactive message outside the normal request/response flow,
+        the user's reply would otherwise start a new, empty LangGraph thread. This method
+        prevents that by pre-creating the LangGraph thread and injecting the sent message
+        as an AIMessage, so the agent has full context when the user replies.
+
+        Note: Context continuity requires the user to reply *in the Slack thread* (i.e.,
+        click "Reply in thread" on this message). Unthreaded DM replies start fresh.
+
+        Args:
+            channel: Slack channel or DM ID (e.g., "C123..." for channels, "D456..." for DMs)
+            text: Message text to send
+            thread_ts: Parent message ts to reply into an existing Slack thread
+
+        Returns:
+            ts of the sent Slack message
+
+        Example:
+            # Send a proactive DM and continue the conversation in the thread
+            ts = await bot.send_proactive_message("D123ABC", "Your report is ready!")
+        """
+        response = await self.slack_app.client.chat_postMessage(
+            channel=channel,
+            text=text,
+            thread_ts=thread_ts,
+        )
+        message_ts = response["ts"]
+
+        continuation_ts = thread_ts or message_ts
+        thread_id = self.handler._create_thread_id(channel, continuation_ts)
+
+        await self.langgraph_client.threads.create(
+            thread_id=thread_id,
+            if_exists="do_nothing",
+        )
+        await self.langgraph_client.threads.update_state(
+            thread_id,
+            values={"messages": [{"role": "assistant", "content": text}]},
+        )
+
+        logger.info(
+            f"Proactive message sent to {channel}, " f"LangGraph thread {thread_id} pre-populated"
+        )
+        return message_ts
+
+    async def send_proactive_dm(self, user_id: str, text: str) -> str:
+        """Open a DM with a Slack user and send a proactive message with LangGraph context.
+
+        Convenience wrapper around send_proactive_message that opens the DM channel
+        from a user ID automatically.
+
+        Args:
+            user_id: Slack user ID (e.g., "U123...")
+            text: Message text to send
+
+        Returns:
+            ts of the sent Slack message
+
+        Example:
+            ts = await bot.send_proactive_dm("U123ABC", "Hey, your plant needs water!")
+        """
+        response = await self.slack_app.client.conversations_open(users=user_id)
+        channel = response["channel"]["id"]
+        return await self.send_proactive_message(channel, text)
+
     def transform_input(self, func: Callable) -> Callable:
         """Decorator to add an input transformer.
 
