@@ -513,10 +513,10 @@ def _make_bot(env=None, **kwargs):
 class TestMultitaskStrategyConfig:
     """Tests for resolving/validating multitask_strategy and delete_interrupted_messages."""
 
-    def test_default_strategy_is_interrupt(self):
+    def test_default_strategy_is_enqueue(self):
         bot = _make_bot()
-        assert bot.multitask_strategy == "interrupt"
-        assert bot.handler.multitask_strategy == "interrupt"
+        assert bot.multitask_strategy == "enqueue"
+        assert bot.handler.multitask_strategy == "enqueue"
 
     def test_constructor_override(self):
         bot = _make_bot(multitask_strategy="enqueue")
