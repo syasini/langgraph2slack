@@ -7,6 +7,7 @@ forwarded to Slack as they arrive, minimizing latency.
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 from ..config import MessageContext
@@ -32,6 +33,44 @@ def _is_image_block_error(error: Exception) -> bool:
     return "downloading image" in error_str or (
         "invalid_blocks" in error_str and "image_url" in error_str
     )
+
+
+def _is_interrupt_error(chunk) -> bool:
+    """Return True when a stream ``error`` event signals a run interruption.
+
+    When a superseding run cancels an in-flight run (multitask_strategy="interrupt"),
+    the server emits an SSE ``error`` event whose payload is serialized as
+    ``{"error": "UserInterrupt", ...}``. A run canceled while still *queued* emits no
+    error event at all (the stream just ends) — that case is handled by lazy stream
+    opening, not here.
+    """
+    if getattr(chunk, "event", None) != "error":
+        return False
+    data = getattr(chunk, "data", None)
+    if isinstance(data, dict) and data.get("error") == "UserInterrupt":
+        return True
+    # Lenient fallback for slightly different serializations.
+    return "UserInterrupt" in str(data)
+
+
+@dataclass
+class StreamResult:
+    """Result of streaming a LangGraph run to Slack.
+
+    Attributes:
+        transformed: Transformer output — str (possibly modified text) or list[dict] blocks.
+        complete_response: Raw accumulated text from the stream (fallback/image extraction).
+        run_id: LangGraph run ID, or None if not captured.
+        stream_ts: Slack stream timestamp that was opened, or None if no content ever
+            streamed (nothing was posted to Slack).
+        outcome: One of "completed", "interrupted", or "error".
+    """
+
+    transformed: object
+    complete_response: str
+    run_id: Optional[str]
+    stream_ts: Optional[str]
+    outcome: str
 
 
 class StreamingHandler(BaseHandler):
@@ -69,6 +108,8 @@ class StreamingHandler(BaseHandler):
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         tool_call_store: Optional[dict] = None,
+        multitask_strategy: str = "interrupt",
+        delete_interrupted_messages: bool = True,
     ):
         """Initialize streaming handler.
 
@@ -93,6 +134,10 @@ class StreamingHandler(BaseHandler):
             show_tool_calls: Show live plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output + View Details button (default: True)
             tool_call_store: Shared dict (from SlackBot) mapping plan_ts -> list[ActiveToolCall]
+            multitask_strategy: Strategy for concurrent runs on the same thread, passed to
+                runs.stream() (default: "interrupt"). See SlackBot for details.
+            delete_interrupted_messages: Delete (rather than freeze) the partial Slack message
+                when a run is interrupted mid-generation (default: True). See SlackBot for details.
         """
         # Initialize base class
         super().__init__(
@@ -114,6 +159,8 @@ class StreamingHandler(BaseHandler):
         self.metadata_builder = metadata_builder
         self.config_builder = config_builder
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
+        self.multitask_strategy = multitask_strategy
+        self.delete_interrupted_messages = delete_interrupted_messages
 
         # Streaming buffer configuration
         self.stream_buffer_time = stream_buffer_time
@@ -182,7 +229,9 @@ class StreamingHandler(BaseHandler):
             bot_reactions: List of reaction configs for bot message (default: None)
 
         Returns:
-            Tuple of (stream_ts, thread_id, run_id) for feedback tracking
+            Tuple of (stream_ts, thread_id, run_id) for feedback tracking. ``stream_ts`` is
+            None when no message was posted to Slack — either the run produced no content, or
+            an interrupted partial was deleted.
         """
         if bot_reactions is None:
             bot_reactions = []
@@ -209,70 +258,107 @@ class StreamingHandler(BaseHandler):
             # Only reply in thread if message was already in a thread
             slack_thread_ts = context.thread_ts
 
-        # Step 5: Start Slack stream
-        stream_ts = await self._start_slack_stream(
-            channel_id=context.channel_id,
-            thread_ts=slack_thread_ts,
-            user_id=context.user_id,
-            team_id=team_id,
-        )
-        logger.info(f"Started Slack stream with ts: {stream_ts}")
-
-        # Start bot-processing reactions in background (don't block LangGraph)
+        # Bot-processing reactions are fired lazily, when the Slack stream first opens
+        # (see _stream_from_langgraph_to_slack). A run that never produces content never
+        # opens a stream, so these reactions are simply never added.
         bot_processing_reactions = [
             r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"
         ]
-        if bot_processing_reactions:
-            self._create_background_task(
-                self._reactions.add_parallel(
-                    bot_processing_reactions, context.channel_id, stream_ts
-                )
-            )
 
+        stream_ts: Optional[str] = None
+        message_deleted = False
         try:
-            # Step 6: Stream from LangGraph and forward to Slack
-            # CRITICAL: Each chunk is sent immediately as it arrives
-            # transformed: output of transformers (str or list[dict] blocks)
-            # complete_response: raw accumulated text (for fallback/image extraction)
-            transformed, complete_response, run_id = await self._stream_from_langgraph_to_slack(
+            # Steps 5+6: Stream from LangGraph, opening the Slack stream lazily on first content.
+            # CRITICAL: Each chunk is sent immediately as it arrives.
+            result = await self._stream_from_langgraph_to_slack(
                 message=transformed_input,
                 langgraph_thread=langgraph_thread,
                 slack_channel=context.channel_id,
-                slack_stream_ts=stream_ts,
                 context=context,
                 slack_thread_ts=slack_thread_ts,
+                user_id=context.user_id,
+                team_id=team_id,
+                bot_processing_reactions=bot_processing_reactions,
             )
+            stream_ts = result.stream_ts
 
-            # Step 7: Stop stream with optional image/custom blocks
+            # Interrupted mid-generation: optionally delete the partial message rather than
+            # freezing it as a half-sentence. If delete fails, fall through to finalize the
+            # partial so nothing regresses relative to legacy behavior.
+            if (
+                result.outcome == "interrupted"
+                and stream_ts is not None
+                and self.delete_interrupted_messages
+            ):
+                message_deleted = await self._delete_interrupted_message(
+                    context.channel_id, stream_ts
+                )
+                if message_deleted:
+                    logger.info(f"Deleted interrupted partial message {stream_ts}")
+                    # No feedback mapping for a deleted message.
+                    return None, langgraph_thread, result.run_id
+
+            # Step 7: Stop stream with optional image/custom blocks.
+            # No-op when stream_ts is None (nothing was ever opened).
             await self._stop_slack_stream(
                 channel_id=context.channel_id,
                 stream_ts=stream_ts,
-                complete_response=complete_response,
-                transformed=transformed,
+                complete_response=result.complete_response,
+                transformed=result.transformed,
                 thread_id=langgraph_thread,
                 slack_thread_ts=slack_thread_ts,
             )
 
-            # Add bot-complete reactions after streaming completes (parallel)
-            bot_complete_reactions = [
-                r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "complete"
-            ]
-            if bot_complete_reactions:
-                await self._reactions.add_parallel(
-                    bot_complete_reactions, context.channel_id, stream_ts
-                )
+            # Add bot-complete reactions after streaming completes (only if a message exists)
+            if stream_ts is not None:
+                bot_complete_reactions = [
+                    r
+                    for r in bot_reactions
+                    if r.get("target") == "bot" and r.get("when") == "complete"
+                ]
+                if bot_complete_reactions:
+                    await self._reactions.add_parallel(
+                        bot_complete_reactions, context.channel_id, stream_ts
+                    )
 
             logger.info(f"Completed streaming for thread {langgraph_thread}")
 
-            return stream_ts, langgraph_thread, run_id
+            return stream_ts, langgraph_thread, result.run_id
 
         finally:
-            # Remove all non-persistent bot reactions
-            for reaction in bot_reactions:
-                if reaction.get("target") == "bot" and not reaction.get("persist", False):
-                    await self._reactions.remove(
-                        context.channel_id, stream_ts, reaction.get("emoji")
-                    )
+            # Remove all non-persistent bot reactions (only if a message exists and was not deleted)
+            if stream_ts is not None and not message_deleted:
+                for reaction in bot_reactions:
+                    if reaction.get("target") == "bot" and not reaction.get("persist", False):
+                        await self._reactions.remove(
+                            context.channel_id, stream_ts, reaction.get("emoji")
+                        )
+
+    async def _delete_interrupted_message(self, channel_id: str, stream_ts: str) -> bool:
+        """Stop and delete a partial message left by an interrupted run.
+
+        Slack requires an active stream to be stopped before the message can be deleted,
+        so we stop first, then delete. This is a frontend-only delete — it does not touch
+        LangGraph thread state (which holds no partial AI message for an interrupted run).
+
+        Args:
+            channel_id: Slack channel ID
+            stream_ts: Timestamp of the partial streamed message
+
+        Returns:
+            True if the message was deleted; False on any failure (caller then finalizes
+            the partial instead so nothing regresses).
+        """
+        try:
+            await self.slack_client.client.chat_stopStream(channel=channel_id, ts=stream_ts)
+        except Exception as e:
+            logger.warning(f"Failed to stop stream before deleting interrupted message: {e}")
+        try:
+            await self.slack_client.client.chat_delete(channel=channel_id, ts=stream_ts)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to delete interrupted message {stream_ts}: {e}")
+            return False
 
     def _should_flush_buffer(
         self,
@@ -468,11 +554,17 @@ class StreamingHandler(BaseHandler):
         message: str,
         langgraph_thread: str,
         slack_channel: str,
-        slack_stream_ts: str,
         context: MessageContext,
         slack_thread_ts: Optional[str] = None,
-    ) -> tuple:
+        user_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        bot_processing_reactions: Optional[list[dict]] = None,
+    ) -> "StreamResult":
         """Stream from LangGraph to Slack with buffered forwarding.
+
+        The Slack stream is opened *lazily* — on the first non-empty buffer flush — so a run
+        that ends before producing any content (canceled while queued, interrupted, or errored
+        before its first token) leaves no message in Slack at all.
 
         Implements time-based buffering to reduce API call overhead:
         - Accumulate chunks in buffer
@@ -483,18 +575,46 @@ class StreamingHandler(BaseHandler):
             message: Transformed message to send to LangGraph
             langgraph_thread: LangGraph thread ID
             slack_channel: Slack channel ID
-            slack_stream_ts: Slack stream timestamp
             context: Message context for output transforms
+            slack_thread_ts: Slack thread timestamp for the streamed message (None if not threaded)
+            user_id: Slack recipient user ID (needed to open the stream)
+            team_id: Slack team/workspace ID (needed to open the stream)
+            bot_processing_reactions: Reactions to add to the bot message once the stream opens
 
         Returns:
-            Tuple of (transformed, complete_response, run_id)
-            - transformed: Transformer output — str (possibly modified text) or list[dict] (custom blocks)
-            - complete_response: Raw accumulated text from the stream (used as fallback)
-            - run_id: LangGraph run ID, or None if not captured
+            StreamResult with transformed output, raw accumulated text, run_id, the opened
+            stream_ts (or None if nothing streamed), and outcome
+            ("completed" | "interrupted" | "error").
         """
+        bot_processing_reactions = bot_processing_reactions or []
         complete_response = ""
         chunk_count = 0
         run_id = None
+        outcome = "completed"
+
+        # The Slack stream is opened lazily on first content (see ensure_stream_open below).
+        stream_ts: Optional[str] = None
+        reactions_started = False
+
+        async def ensure_stream_open() -> str:
+            """Open the Slack stream on first use and fire bot-processing reactions once."""
+            nonlocal stream_ts, reactions_started
+            if stream_ts is None:
+                stream_ts = await self._start_slack_stream(
+                    channel_id=slack_channel,
+                    thread_ts=slack_thread_ts,
+                    user_id=user_id,
+                    team_id=team_id,
+                )
+                logger.info(f"Lazily opened Slack stream with ts: {stream_ts}")
+                if bot_processing_reactions and not reactions_started:
+                    reactions_started = True
+                    self._create_background_task(
+                        self._reactions.add_parallel(
+                            bot_processing_reactions, slack_channel, stream_ts
+                        )
+                    )
+            return stream_ts
 
         # Tool call tracking (only active when show_tool_calls=True)
         tracker = ToolCallTracker() if self.show_tool_calls else None
@@ -522,7 +642,7 @@ class StreamingHandler(BaseHandler):
                 assistant_id=self.assistant_id,
                 input={"messages": [{"role": "user", "content": message}]},
                 stream_mode=["messages-tuple"],
-                multitask_strategy="interrupt",
+                multitask_strategy=self.multitask_strategy,
                 if_not_exists="create",
                 metadata=metadata,
                 config=config,
@@ -540,6 +660,18 @@ class StreamingHandler(BaseHandler):
                     ):
                         run_id = chunk.data["run_id"]
                         logger.info(f"Captured run_id: {run_id}")
+
+                # Detect a server-side interruption (a superseding run canceled this one).
+                # Mark the outcome and stop the loop WITHOUT routing into the generic error
+                # path — process_message decides whether to delete or keep the partial.
+                # A run canceled while still queued emits no event at all; that case needs
+                # no detection here because the stream simply never opened.
+                # (An optional runs.get(run_id) status re-check could classify rare
+                # stragglers, but it costs a roundtrip and is intentionally not done.)
+                if _is_interrupt_error(chunk):
+                    logger.info("Run interrupted (UserInterrupt) — stopping stream loop")
+                    outcome = "interrupted"
+                    break
 
                 # Only process message chunks (skip metadata/other events)
                 if chunk.event != "messages":
@@ -707,14 +839,16 @@ class StreamingHandler(BaseHandler):
                 should_flush, reason = self._should_flush_buffer(buffer, last_flush_time)
                 if should_flush:
                     logger.debug(f"Flushing buffer: {len(buffer)} chunks (reason: {reason})")
+                    ts = await ensure_stream_open()
                     last_flush_time = await self._flush_buffer_and_return_time(
-                        buffer, slack_channel, slack_stream_ts
+                        buffer, slack_channel, ts
                     )
 
             # Final flush for any remaining content
             if buffer:
                 logger.debug(f"Final flush: {len(buffer)} chunks remaining")
-                await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
+                ts = await ensure_stream_open()
+                await self._flush_buffer(buffer, slack_channel, ts)
 
             logger.info(f"Stream completed: {chunk_count} chunks, {len(complete_response)} chars")
             if tracker is not None:
@@ -732,22 +866,23 @@ class StreamingHandler(BaseHandler):
 
         except Exception as e:
             logger.error(f"Error during streaming: {e}", exc_info=True)
-            # Flush any buffered content before showing error
-            try:
-                if buffer:
-                    await self._flush_buffer(buffer, slack_channel, slack_stream_ts)
-            except Exception:
-                pass  # Best effort
-
-            # Try to append error message to stream
-            try:
-                await self._append_to_slack_stream(
-                    channel_id=slack_channel,
-                    stream_ts=slack_stream_ts,
-                    content="\n\n_Error: Unable to complete response_",
-                )
-            except Exception:
-                pass  # Best effort
+            outcome = "error"
+            # Surface the error in Slack only if some content was produced (streamed or still
+            # buffered). A run that errors before producing any content leaves no message at
+            # all — consistent with the lazy-open behavior. Note this differs from an interrupt,
+            # where we intentionally never open a stream just to show a partial (it gets deleted).
+            if complete_response or buffer:
+                try:
+                    ts = await ensure_stream_open()
+                    if buffer:
+                        await self._flush_buffer(buffer, slack_channel, ts)
+                    await self._append_to_slack_stream(
+                        channel_id=slack_channel,
+                        stream_ts=ts,
+                        content="\n\n_Error: Unable to complete response_",
+                    )
+                except Exception:
+                    pass  # Best effort
 
         # Apply output transformers to the accumulated text response.
         # Note: We transform after streaming completes so transformers see the full context.
@@ -765,7 +900,13 @@ class StreamingHandler(BaseHandler):
         if plan_ts and tracker and tracker.has_calls():
             await self._finalize_plan_block(slack_channel, plan_ts, tracker, run_id)
 
-        return transformed, complete_response, run_id
+        return StreamResult(
+            transformed=transformed,
+            complete_response=complete_response,
+            run_id=run_id,
+            stream_ts=stream_ts,
+            outcome=outcome,
+        )
 
     async def _start_slack_stream(
         self,
@@ -936,13 +1077,16 @@ class StreamingHandler(BaseHandler):
     async def _stop_slack_stream(
         self,
         channel_id: str,
-        stream_ts: str,
+        stream_ts: Optional[str],
         complete_response: str,
         transformed=None,
         thread_id: str = None,
         slack_thread_ts: Optional[str] = None,
     ) -> None:
         """Stop Slack stream and add optional blocks (images, buttons).
+
+        No-op when ``stream_ts`` is None (the stream was never opened because no content
+        was ever produced).
 
         The text has already been streamed, so we only add image blocks (if extract_images=True)
         and feedback/thread_id blocks.
@@ -971,6 +1115,11 @@ class StreamingHandler(BaseHandler):
             slack_thread_ts: Slack thread timestamp for posting follow-up messages
                              in multi-message mode
         """
+        # Nothing was ever opened (no content streamed) — nothing to stop or update.
+        if stream_ts is None:
+            logger.debug("No stream was opened; skipping stop/update")
+            return
+
         # Determine whether the transformer returned custom blocks, multi-message, or text
         if isinstance(transformed, list):
             if transformed and isinstance(transformed[0], list):

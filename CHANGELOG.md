@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-13
+### Added
+- `multitask_strategy` SlackBot parameter + `MULTITASK_STRATEGY` env var — controls what happens when a new message arrives while a run is still in flight on the same thread (`"interrupt"` (default), `"enqueue"`, `"reject"`, `"rollback"`). Applies to both streaming and non-streaming handlers. Set `"enqueue"` to let the current reply finish before the next message is processed.
+- `delete_interrupted_messages` SlackBot parameter (default `True`) — when a run is interrupted mid-generation, delete the partial Slack message instead of leaving it frozen mid-sentence. Frontend-only `chat.delete`; falls back to finalizing the partial if the delete fails.
+
+### Changed
+- **Streaming stream is now opened lazily**, on the first chunk of real content, instead of eagerly before the LangGraph run is created. A run that ends before producing any token (canceled while queued, interrupted, or errored early) now leaves **no** message in Slack at all — fixing blank, icon-only bot bubbles.
+- Non-streaming mode now sends `multitask_strategy` to `runs.create()` (previously it sent none and relied on the server default `enqueue`). With the default it now uses `"interrupt"`, matching streaming mode. Pass `multitask_strategy="enqueue"` to restore the previous non-streaming behavior.
+- `StreamingHandler._stream_from_langgraph_to_slack` now returns a `StreamResult` dataclass (transformed, complete_response, run_id, stream_ts, outcome) and opens the Slack stream internally (private API change).
+
+### Fixed
+- Interrupted runs no longer leave replies frozen mid-sentence (e.g. "Look at that wild **backgroun"). With `delete_interrupted_messages=True` (default) the partial is deleted; the superseding run's reply covers its content.
+
 ## [0.6.0] - 2026-05-07
 ### Added
 - `@bot.transform_config` decorator to inject per-run agent configuration — mirrors `@bot.transform_metadata` but passes config to `get_config()` in LangGraph agents, enabling runtime injection of repo names, auth tokens, feature flags, etc.

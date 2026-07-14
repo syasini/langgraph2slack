@@ -488,3 +488,59 @@ class TestNonStreamingCustomBlocks:
         }
         assert all(b.get("type") != "image" for b in result)
         assert result[-1] == {"type": "context", "elements": []}
+
+
+# ============================================================================
+# Tests: multitask_strategy + delete_interrupted_messages resolution
+# ============================================================================
+
+
+def _make_bot(env=None, **kwargs):
+    """Build a SlackBot with Slack/FastAPI wiring patched out, for config tests."""
+    base_env = {
+        "SLACK_BOT_TOKEN": "xoxb-test-token",
+        "SLACK_SIGNING_SECRET": "test-secret",
+        "ASSISTANT_ID": "test-assistant",
+    }
+    if env:
+        base_env.update(env)
+    with patch.object(SlackBot, "_setup_slack_handlers"), \
+         patch.object(SlackBot, "_create_fastapi_app"):
+        with patch.dict("os.environ", base_env, clear=False):
+            return SlackBot(**kwargs)
+
+
+class TestMultitaskStrategyConfig:
+    """Tests for resolving/validating multitask_strategy and delete_interrupted_messages."""
+
+    def test_default_strategy_is_interrupt(self):
+        bot = _make_bot()
+        assert bot.multitask_strategy == "interrupt"
+        assert bot.handler.multitask_strategy == "interrupt"
+
+    def test_constructor_override(self):
+        bot = _make_bot(multitask_strategy="enqueue")
+        assert bot.multitask_strategy == "enqueue"
+        assert bot.handler.multitask_strategy == "enqueue"
+
+    def test_env_var_is_read(self):
+        bot = _make_bot(env={"MULTITASK_STRATEGY": "enqueue"})
+        assert bot.multitask_strategy == "enqueue"
+
+    def test_constructor_overrides_env(self):
+        bot = _make_bot(env={"MULTITASK_STRATEGY": "enqueue"}, multitask_strategy="reject")
+        assert bot.multitask_strategy == "reject"
+
+    def test_invalid_strategy_raises(self):
+        with pytest.raises(ValueError, match="Invalid multitask_strategy"):
+            _make_bot(multitask_strategy="nonsense")
+
+    def test_delete_interrupted_messages_default_true(self):
+        bot = _make_bot()
+        assert bot.delete_interrupted_messages is True
+        assert bot.handler.delete_interrupted_messages is True
+
+    def test_delete_interrupted_messages_can_be_disabled(self):
+        bot = _make_bot(delete_interrupted_messages=False)
+        assert bot.delete_interrupted_messages is False
+        assert bot.handler.delete_interrupted_messages is False
