@@ -130,6 +130,8 @@ class SlackBot:
         stream_buffer_max_chunks: int = 10,
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
+        multitask_strategy: Optional[str] = None,
+        delete_interrupted_messages: bool = True,
     ):
         """Initialize SlackBot.
 
@@ -194,6 +196,23 @@ class SlackBot:
                 in each task card and add a "View Full Details" button (default: True).
                 Clicking the button opens a modal with full untruncated content (SQL, JSON, etc.).
                 Set to False to show only tool name + status.
+            multitask_strategy: How to handle a new message that arrives while a run is still
+                in flight on the same thread (or from env: MULTITASK_STRATEGY). One of:
+                - "interrupt" (default): cancel the in-flight run and start the new one.
+                - "enqueue": let the current run finish, then process the new message.
+                - "reject": reject the new run while one is active.
+                - "rollback": cancel and roll back the in-flight run, then start the new one.
+                Applies to both streaming and non-streaming handlers. Note: prior versions sent
+                no strategy in non-streaming mode (server default "enqueue"); non-streaming now
+                uses this setting too. Defaults to "interrupt" for backward compatibility.
+            delete_interrupted_messages: When multitask_strategy="interrupt" and a run is
+                interrupted mid-generation, delete the partial Slack message instead of leaving
+                it frozen mid-sentence (default: True). This is a frontend-only delete
+                (chat.delete); it does not modify LangGraph thread state. It is safe because
+                LangGraph's interrupt does not checkpoint a node's partial mid-token output, so
+                the thread history holds no partial AI message to be out of sync with. Set to
+                False to keep (finalize) the partial message, matching legacy behavior. If your
+                graph persists partial output to thread state, prefer False.
         """
         logger.info("Initializing SlackBot...")
 
@@ -207,6 +226,10 @@ class SlackBot:
 
         # Validate buffer configuration (raises ValueError if invalid)
         self._validate_buffer_config(stream_buffer_time, stream_buffer_max_chunks)
+
+        # Resolve and validate multitask strategy (constructor overrides env; default "interrupt")
+        self.multitask_strategy = self._resolve_multitask_strategy(multitask_strategy)
+        self.delete_interrupted_messages = delete_interrupted_messages
 
         # Store settings
         self.streaming_enabled = streaming
@@ -277,6 +300,8 @@ class SlackBot:
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
                 tool_call_store=self.tool_call_store,
+                multitask_strategy=self.multitask_strategy,
+                delete_interrupted_messages=self.delete_interrupted_messages,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:
@@ -296,6 +321,7 @@ class SlackBot:
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
                 tool_call_store=self.tool_call_store,
+                multitask_strategy=self.multitask_strategy,
             )
             logger.info("Using MessageHandler (non-streaming)")
 
@@ -613,6 +639,32 @@ class SlackBot:
                 "This may cause memory issues or delayed flushing. "
                 "Recommended range: 5-20 chunks."
             )
+
+    # Supported LangGraph multitask strategies for concurrent runs on the same thread.
+    _VALID_MULTITASK_STRATEGIES = frozenset({"interrupt", "enqueue", "reject", "rollback"})
+
+    def _resolve_multitask_strategy(self, multitask_strategy: Optional[str]) -> str:
+        """Resolve and validate the multitask strategy.
+
+        Constructor argument overrides the MULTITASK_STRATEGY env value, which in turn
+        overrides the "interrupt" default.
+
+        Args:
+            multitask_strategy: Explicit strategy from the constructor (or None)
+
+        Returns:
+            The resolved strategy string
+
+        Raises:
+            ValueError: If the resolved strategy is not one of the supported values
+        """
+        strategy = multitask_strategy or self.config.MULTITASK_STRATEGY or "interrupt"
+        if strategy not in self._VALID_MULTITASK_STRATEGIES:
+            raise ValueError(
+                f"Invalid multitask_strategy={strategy!r}. "
+                f"Must be one of {sorted(self._VALID_MULTITASK_STRATEGIES)}."
+            )
+        return strategy
 
     def _convert_legacy_reaction(self, processing_reaction: str) -> dict:
         """Convert legacy processing_reaction parameter to new reaction format.

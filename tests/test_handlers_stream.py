@@ -107,6 +107,11 @@ def mock_slack_client():
         "ts": "1234567.890"
     })
 
+    mock.client.chat_delete = AsyncMock(return_value={
+        "ok": True,
+        "ts": "1234567.890"
+    })
+
     mock.client.auth_test = AsyncMock(return_value={
         "ok": True,
         "team_id": "T123TEAM",
@@ -294,12 +299,16 @@ class TestStreamFromLangGraphToSlack:
     @pytest.mark.asyncio
     async def test_stream_basic_three_chunks(self, basic_streaming_handler, sample_context):
         """Should stream 3 chunks and accumulate them correctly."""
-        transformed, complete_response, run_id = await basic_streaming_handler._stream_from_langgraph_to_slack(
+        result = await basic_streaming_handler._stream_from_langgraph_to_slack(
             message="Test message",
             langgraph_thread="thread-123",
             slack_channel="C456CHANNEL",
-            slack_stream_ts="1234567.890",
             context=sample_context
+        )
+        transformed, complete_response, run_id = (
+            result.transformed,
+            result.complete_response,
+            result.run_id,
         )
 
         # Verify complete response was accumulated
@@ -347,13 +356,13 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        _, _, run_id = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        run_id = result.run_id
 
         assert run_id == "custom-run-456"
 
@@ -391,13 +400,13 @@ class TestStreamFromLangGraphToSlack:
             message_types=["AIMessageChunk"]  # Only process AIMessageChunk
         )
 
-        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        complete_response = result.complete_response
 
         # Only AIMessageChunk content should be in response
         assert complete_response == "AI response"
@@ -434,13 +443,13 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        complete_response = result.complete_response
 
         # Should concatenate text blocks only
         assert complete_response == "Part 1 Part 2"
@@ -477,13 +486,13 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        complete_response = result.complete_response
 
         # Only real content should be in response
         assert complete_response == "Real content"
@@ -523,13 +532,13 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        complete_response = result.complete_response
 
         # Only message event content
         assert complete_response == "Hello"
@@ -554,13 +563,13 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=output_chain,
         )
 
-        transformed, complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        transformed, complete_response = result.transformed, result.complete_response
 
         # Output transformer should be applied to the transformed output
         assert "Hello world!" in complete_response  # raw accumulated text
@@ -588,13 +597,13 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        _, complete_response, _ = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        complete_response = result.complete_response
 
         # Should have partial response
         assert complete_response == "Start"
@@ -632,7 +641,6 @@ class TestStreamFromLangGraphToSlack:
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
 
@@ -656,13 +664,13 @@ class TestStreamFromLangGraphToSlack:
             output_transformers=TransformerChain(),
         )
 
-        transformed, complete_response, run_id = await handler._stream_from_langgraph_to_slack(
+        result = await handler._stream_from_langgraph_to_slack(
             message="test",
             langgraph_thread="thread-123",
             slack_channel="C123",
-            slack_stream_ts="1234567.890",
             context=sample_context
         )
+        complete_response, run_id = result.complete_response, result.run_id
 
         # Empty response
         assert complete_response == ""
@@ -672,6 +680,11 @@ class TestStreamFromLangGraphToSlack:
 
         # No appends
         assert mock_slack_client.client.chat_appendStream.call_count == 0
+
+        # Lazy open: an empty stream never opens a Slack stream
+        assert result.stream_ts is None
+        assert result.outcome == "completed"
+        assert mock_slack_client.client.chat_startStream.call_count == 0
 
 
 # ============================================================================
@@ -1258,3 +1271,223 @@ class TestProcessMessage:
         # (We can't easily verify this without inspecting the stream call,
         # but the transformer was applied - no error means success)
         assert True  # If we get here, transformers worked
+
+
+# ============================================================================
+# Tests: Interrupt handling + lazy stream open
+# ============================================================================
+
+
+def _interrupt_stream(*args, **kwargs):
+    """Fake stream: metadata + two content chunks, then a UserInterrupt error event."""
+
+    async def _gen(*a, **k):
+        yield MagicMock(event="metadata", data={"run_id": "run-interrupted"})
+        yield MagicMock(
+            event="messages",
+            data=({"type": "AIMessageChunk", "content": "Look at that wild "}, {}),
+        )
+        yield MagicMock(
+            event="messages",
+            data=({"type": "AIMessageChunk", "content": "backgroun"}, {}),
+        )
+        # Server-side interruption: SSE error event carrying a UserInterrupt payload.
+        yield MagicMock(event="error", data={"error": "UserInterrupt", "message": "canceled"})
+
+    return _gen
+
+
+class TestInterruptHandling:
+    """Tests for interrupted-run detection, deletion, and lazy stream opening."""
+
+    @pytest.mark.asyncio
+    async def test_interrupt_deletes_partial_by_default(
+        self, mock_langgraph_client, mock_slack_client, sample_context
+    ):
+        """Interrupt + delete_interrupted_messages=True: partial appears then is deleted."""
+        mock_langgraph_client.runs.stream = _interrupt_stream()
+
+        handler = StreamingHandler(
+            langgraph_client=mock_langgraph_client,
+            slack_client=mock_slack_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=TransformerChain(),
+        )
+
+        stream_ts, thread_id, run_id = await handler.process_message(
+            message="hi", context=sample_context
+        )
+
+        # Message was deleted → no stream_ts returned (no feedback mapping)
+        assert stream_ts is None
+        assert run_id == "run-interrupted"
+
+        # The partial did briefly appear (stream opened + content appended)...
+        mock_slack_client.client.chat_startStream.assert_called_once()
+        assert mock_slack_client.client.chat_appendStream.call_count >= 1
+        # ...then it was stopped and deleted...
+        mock_slack_client.client.chat_stopStream.assert_called()
+        mock_slack_client.client.chat_delete.assert_called_once()
+        # ...and NOT finalized as a frozen half-sentence.
+        mock_slack_client.client.chat_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_keeps_partial_when_delete_disabled(
+        self, mock_langgraph_client, mock_slack_client, sample_context
+    ):
+        """Interrupt + delete_interrupted_messages=False: partial is finalized, not deleted."""
+        mock_langgraph_client.runs.stream = _interrupt_stream()
+
+        handler = StreamingHandler(
+            langgraph_client=mock_langgraph_client,
+            slack_client=mock_slack_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=TransformerChain(),
+            delete_interrupted_messages=False,
+        )
+
+        stream_ts, thread_id, run_id = await handler.process_message(
+            message="hi", context=sample_context
+        )
+
+        # Finalized (legacy behavior) — message kept
+        assert stream_ts == "1234567.890"
+        mock_slack_client.client.chat_delete.assert_not_called()
+        mock_slack_client.client.chat_update.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_delete_failure_falls_back_to_finalize(
+        self, mock_langgraph_client, mock_slack_client, sample_context
+    ):
+        """If chat_delete fails, fall back to finalizing the partial (no regression)."""
+        mock_langgraph_client.runs.stream = _interrupt_stream()
+        mock_slack_client.client.chat_delete = AsyncMock(
+            side_effect=Exception("cannot delete")
+        )
+
+        handler = StreamingHandler(
+            langgraph_client=mock_langgraph_client,
+            slack_client=mock_slack_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=TransformerChain(),
+        )
+
+        stream_ts, thread_id, run_id = await handler.process_message(
+            message="hi", context=sample_context
+        )
+
+        # Delete attempted but failed → partial finalized instead
+        mock_slack_client.client.chat_delete.assert_called_once()
+        assert stream_ts == "1234567.890"
+        mock_slack_client.client.chat_update.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_queued_cancel_leaves_no_message(
+        self, mock_langgraph_client, mock_slack_client, sample_context
+    ):
+        """A run canceled while queued (zero events) makes NO Slack calls at all."""
+
+        async def empty_stream(*args, **kwargs):
+            return
+            yield  # make it a generator (unreachable)
+
+        mock_langgraph_client.runs.stream = empty_stream
+
+        handler = StreamingHandler(
+            langgraph_client=mock_langgraph_client,
+            slack_client=mock_slack_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=TransformerChain(),
+        )
+
+        stream_ts, thread_id, run_id = await handler.process_message(
+            message="hi", context=sample_context
+        )
+
+        assert stream_ts is None
+        assert run_id is None
+        mock_slack_client.client.chat_startStream.assert_not_called()
+        mock_slack_client.client.chat_appendStream.assert_not_called()
+        mock_slack_client.client.chat_stopStream.assert_not_called()
+        mock_slack_client.client.chat_update.assert_not_called()
+        mock_slack_client.client.chat_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_normal_completion_unchanged(
+        self, basic_streaming_handler, sample_context
+    ):
+        """Normal completion: start, append, stop, final update with blocks — unchanged."""
+        stream_ts, thread_id, run_id = await basic_streaming_handler.process_message(
+            message="hi", context=sample_context
+        )
+
+        assert stream_ts == "1234567.890"
+        assert run_id == "test-run-123"
+        basic_streaming_handler.slack_client.client.chat_startStream.assert_called_once()
+        assert basic_streaming_handler.slack_client.client.chat_appendStream.call_count >= 1
+        basic_streaming_handler.slack_client.client.chat_stopStream.assert_called_once()
+        basic_streaming_handler.slack_client.client.chat_update.assert_called()
+        basic_streaming_handler.slack_client.client.chat_delete.assert_not_called()
+
+
+class TestMultitaskStrategy:
+    """Tests that multitask_strategy is plumbed through to runs.stream()."""
+
+    @pytest.mark.asyncio
+    async def test_strategy_passed_to_runs_stream(
+        self, mock_langgraph_client, mock_slack_client, sample_context
+    ):
+        captured = {}
+
+        async def capture_stream(*args, **kwargs):
+            captured["multitask_strategy"] = kwargs.get("multitask_strategy")
+            yield MagicMock(
+                event="messages",
+                data=({"type": "AIMessageChunk", "content": "hi"}, {}),
+            )
+
+        mock_langgraph_client.runs.stream = capture_stream
+
+        handler = StreamingHandler(
+            langgraph_client=mock_langgraph_client,
+            slack_client=mock_slack_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=TransformerChain(),
+            multitask_strategy="enqueue",
+        )
+
+        await handler.process_message(message="x", context=sample_context)
+
+        assert captured["multitask_strategy"] == "enqueue"
+
+    @pytest.mark.asyncio
+    async def test_default_strategy_is_interrupt(
+        self, mock_langgraph_client, mock_slack_client, sample_context
+    ):
+        captured = {}
+
+        async def capture_stream(*args, **kwargs):
+            captured["multitask_strategy"] = kwargs.get("multitask_strategy")
+            yield MagicMock(
+                event="messages",
+                data=({"type": "AIMessageChunk", "content": "hi"}, {}),
+            )
+
+        mock_langgraph_client.runs.stream = capture_stream
+
+        handler = StreamingHandler(
+            langgraph_client=mock_langgraph_client,
+            slack_client=mock_slack_client,
+            assistant_id="test",
+            input_transformers=TransformerChain(),
+            output_transformers=TransformerChain(),
+        )
+
+        await handler.process_message(message="x", context=sample_context)
+
+        assert captured["multitask_strategy"] == "interrupt"

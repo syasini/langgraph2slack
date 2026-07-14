@@ -257,7 +257,6 @@ class TestHandlerConfigBuilder:
             message="Hello",
             langgraph_thread="thread-123",
             slack_channel="C456",
-            slack_stream_ts="111.222",
             context=context,
             slack_thread_ts=None,
         )

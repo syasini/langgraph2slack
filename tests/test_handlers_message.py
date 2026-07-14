@@ -356,6 +356,7 @@ class TestInvokeLangGraph:
             assistant_id="test-assistant",
             input={"messages": [{"role": "user", "content": "Hello"}]},
             if_not_exists="create",
+            multitask_strategy="interrupt",
             metadata={},
             config=None,
         )
@@ -398,6 +399,40 @@ class TestInvokeLangGraph:
         assert call_kwargs["metadata"]["user_id"] == "U123USER"
         assert call_kwargs["metadata"]["channel_id"] == "C456CHANNEL"
         assert call_kwargs["metadata"]["custom_field"] == "test_value"
+
+    @pytest.mark.asyncio
+    async def test_invoke_passes_multitask_strategy(self, mock_langgraph_client, sample_context):
+        """Non-streaming handler should forward multitask_strategy to runs.create."""
+        handler = MessageHandler(
+            langgraph_client=mock_langgraph_client,
+            assistant_id="test-assistant",
+            input_transformers=TransformerChain(),
+            output_transformers=TransformerChain(),
+            multitask_strategy="enqueue",
+        )
+
+        await handler._invoke_langgraph(
+            message="Test",
+            thread_id="thread-123",
+            context=sample_context,
+        )
+
+        call_kwargs = mock_langgraph_client.runs.create.call_args.kwargs
+        assert call_kwargs["multitask_strategy"] == "enqueue"
+
+    @pytest.mark.asyncio
+    async def test_invoke_default_multitask_strategy_is_interrupt(
+        self, basic_handler, mock_langgraph_client, sample_context
+    ):
+        """Non-streaming handler defaults to interrupt strategy."""
+        await basic_handler._invoke_langgraph(
+            message="Test",
+            thread_id="thread-123",
+            context=sample_context,
+        )
+
+        call_kwargs = mock_langgraph_client.runs.create.call_args.kwargs
+        assert call_kwargs["multitask_strategy"] == "interrupt"
 
     @pytest.mark.asyncio
     async def test_invoke_without_metadata_builder(self, basic_handler, mock_langgraph_client, sample_context):

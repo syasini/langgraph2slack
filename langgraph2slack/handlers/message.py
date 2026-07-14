@@ -47,6 +47,7 @@ class MessageHandler(BaseHandler):
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         tool_call_store: Optional[Dict] = None,
+        multitask_strategy: str = "interrupt",
     ):
         """Initialize message handler.
 
@@ -66,6 +67,8 @@ class MessageHandler(BaseHandler):
             show_tool_calls: Show plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output + View Details button (default: True)
             tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall]
+            multitask_strategy: Strategy for concurrent runs on the same thread, passed to
+                runs.create() (default: "interrupt"). See SlackBot for details.
         """
         # Initialize base class
         super().__init__(
@@ -86,6 +89,7 @@ class MessageHandler(BaseHandler):
         self.config_builder = config_builder
         self.slack_client = slack_client
         self.reply_in_thread = reply_in_thread
+        self.multitask_strategy = multitask_strategy
 
     async def process_message(
         self,
@@ -330,6 +334,7 @@ class MessageHandler(BaseHandler):
                 assistant_id=self.assistant_id,
                 input={"messages": [{"role": "user", "content": message}]},
                 if_not_exists="create",
+                multitask_strategy=self.multitask_strategy,
                 metadata=metadata,
                 config=config,
             )

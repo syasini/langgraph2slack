@@ -49,6 +49,11 @@ class BotConfig(BaseSettings):
     # Optional settings
     LANGGRAPH_URL: Optional[str] = None  # None = use loopback (on platform)
 
+    # Multitask strategy for concurrent runs on the same thread.
+    # One of: "enqueue" (finish current, then process next), "interrupt" (cancel in-flight run),
+    # "reject", "rollback". Defaults to "enqueue" for safety (especially with tool-using agents).
+    MULTITASK_STRATEGY: str = "enqueue"
+
     def get_slack_bot_token(self) -> str:
         """Get Slack bot token as plain string."""
         return self.SLACK_BOT_TOKEN.get_secret_value()
