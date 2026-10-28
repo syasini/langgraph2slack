@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- Refreshed `uv.lock` to the latest releases (`langgraph-sdk` 0.4.10, `langsmith` 0.14.14, `slack-bolt` 1.30.0, `slack-sdk` 3.45.0); the full test suite passes unchanged. Declared minimum versions are unchanged.
+- `examples/plant_bot` now targets the latest LangGraph stack (`langgraph` 1.2.18, `langgraph-api` 0.16.9, `langchain` 1.4.7) and requires Python ≥ 3.11 (required by `langgraph-api`).
+
+### Added
+- `deepagents` in the `dev` extra (Python ≥ 3.11) for tests against real deep-agent payload shapes. It is not a runtime dependency.
+
+### Fixed
+- `examples/plant_bot` installs `langgraph2slack` from the repo root via `[tool.uv.sources]` instead of a machine-specific absolute path.
 
 ## [0.7.1] - 2026-10-28
 ### Fixed
