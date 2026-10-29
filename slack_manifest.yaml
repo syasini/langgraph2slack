@@ -62,8 +62,15 @@ settings:
       - app_mention              # Bot is @mentioned in a channel
       - assistant_thread_started # Assistant thread started (for Chat tab)
       - message.channels         # Messages in public channels (where bot is member)
+      - message.groups           # Messages in private channels (where bot is member)
       - message.im               # Direct messages to the bot
       - message.mpim             # Group direct messages
+
+  # Required for buttons and modals (feedback buttons, tool call details).
+  # Use the same URL as event_subscriptions.request_url above.
+  interactivity:
+    is_enabled: true
+    request_url: https://your-deployment-url/events/slack  # REPLACE THIS!
 
   org_deploy_enabled: false
   socket_mode_enabled: false  # We use HTTP mode, not Socket mode
