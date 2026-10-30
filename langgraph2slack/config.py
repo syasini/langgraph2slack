@@ -5,13 +5,17 @@ with validation and type safety.
 """
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dotenv import find_dotenv
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .triggers import Provenance, Trigger
+
+if TYPE_CHECKING:
+    from .framing import RequestedBy
+    from .normalizer import NormalizedMessage
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +99,11 @@ class MessageContext:
         self._trigger_kind = trigger.kind if trigger else None
         self._provenance = trigger.provenance if trigger else Provenance.from_message(event)
 
+        # Filled in by SlackBot before the run: who the request line names, and the earlier
+        # Slack messages handed over as backfill (oldest first)
+        self.requested_by: Optional["RequestedBy"] = None
+        self.backfill: tuple["NormalizedMessage", ...] = ()
+
         # Extract basic info from event (no API calls needed)
         self._user_id = event.get("user", "")
         self._channel_id = event.get("channel", "")
@@ -138,10 +147,21 @@ class MessageContext:
         return self._thread_ts is not None
 
     @property
+    def conversation_ts(self) -> str:
+        """Root of the Slack thread this conversation maps to: the thread if the message is
+        a reply, otherwise the message itself."""
+        return self._thread_ts or self._message_ts
+
+    @property
     def trigger_kind(self) -> Optional[str]:
         """How the run was triggered: 'mention', 'direct_message', 'joined_thread',
         'shortcut' or 'edit'."""
         return self._trigger_kind
+
+    @property
+    def provenance(self) -> Provenance:
+        """Who authored the trigger, and the requester's ID."""
+        return self._provenance
 
     @property
     def author_type(self) -> str:
@@ -188,5 +208,5 @@ class MessageContext:
             "channel_type": self.channel_type,
             "message_ts": self.message_ts,
             "thread_ts": self.thread_ts,
-            "conversation_ts": self.thread_ts or self.message_ts,
+            "conversation_ts": self.conversation_ts,
         }

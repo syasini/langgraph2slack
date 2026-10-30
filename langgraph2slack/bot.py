@@ -16,12 +16,15 @@ from pydantic import SecretStr
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.async_app import AsyncApp
 
+from .backfill import BackfillCollector
 from .config import BotConfig, MessageContext
+from .framing import RequestedBy, TriggerInput, default_framer
 from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
+from .normalizer import NormalizedMessage, SlackMessageNormalizer
 from .state import BridgeState, DeploymentStateStore, StateStore
-from .transformers import DictTransformerChain, TransformerChain
-from .triggers import BotTriggerPolicy, BridgeIdentity, TriggerGate
+from .transformers import DictTransformerChain, TransformerChain, call_hook
+from .triggers import BotTriggerPolicy, BridgeIdentity, Trigger, TriggerGate
 from .utils import (
     TOOL_CALL_DETAILS_ACTION_ID,
     clean_markdown,
@@ -136,6 +139,9 @@ class SlackBot:
         allow_bot_triggers: bool = False,
         bot_trigger_allowlist: Optional[list[str]] = None,
         allowlisted_bots_in_joined_threads: bool = False,
+        backfill: bool = True,
+        backfill_max_messages: int = 20,
+        backfill_max_chars: int = 8000,
     ):
         """Initialize SlackBot.
 
@@ -231,6 +237,12 @@ class SlackBot:
             allowlisted_bots_in_joined_threads: Let allowlisted bots trigger the agent in
                 threads it has joined without mentioning it, e.g. a trusted companion agent
                 (default: False; bots must always mention the agent). Requires an allowlist.
+            backfill: On the first trigger in a Slack thread, hand the agent the thread's
+                earlier messages as untrusted context; on later triggers, what was posted
+                since it last replied (default: True).
+            backfill_max_messages: At most this many backfill messages, the most recent kept
+                (default: 20).
+            backfill_max_chars: At most this many characters of backfill text (default: 8000).
         """
         logger.info("Initializing SlackBot...")
 
@@ -301,6 +313,19 @@ class SlackBot:
         # Initialize reaction mixin for shared reaction operations
         self._reactions = ReactionMixin(self.slack_app.client)
 
+        # Slack messages -> markdown; earlier thread messages -> backfill; the run's input
+        self._normalizer = SlackMessageNormalizer(self.slack_app.client, self.state)
+        self._backfill = BackfillCollector(
+            self.slack_app.client,
+            self.langgraph_client,
+            self.state,
+            self._normalizer,
+            enabled=backfill,
+            max_messages=backfill_max_messages,
+            max_chars=backfill_max_chars,
+        )
+        self._input_formatter: Optional[Callable] = None
+
         # Create appropriate handler based on streaming setting
         if self.streaming_enabled:
             self.handler = StreamingHandler(
@@ -315,6 +340,7 @@ class SlackBot:
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
+                input_builder=self._build_run_input,
                 config_builder=self._build_config,
                 message_types=self.message_types,
                 stream_buffer_time=stream_buffer_time,
@@ -337,6 +363,7 @@ class SlackBot:
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
+                input_builder=self._build_run_input,
                 config_builder=self._build_config,
                 slack_client=self.slack_app,
                 reply_in_thread=self.reply_in_thread,
@@ -454,6 +481,8 @@ class SlackBot:
         continuation_ts = thread_ts or message_ts
         thread_id = self.handler._create_thread_id(channel, continuation_ts)
         await self.state.mark_joined(channel, continuation_ts)
+        # Replies under this message continue the conversation: catch up from here
+        await self._backfill.advance(channel, continuation_ts, message_ts)
 
         await self.langgraph_client.threads.create(
             thread_id=thread_id,
@@ -567,6 +596,31 @@ class SlackBot:
             The function (for decorator usage)
         """
         return self._metadata_transformers.add(func)
+
+    def format_input(self, func: Callable) -> Callable:
+        """Decorator to replace how the run's input message is built.
+
+        By default the request and any backfill reach the agent as one human message: an
+        untrusted context section with the earlier Slack messages, then the request with a
+        line naming the requester and how the run was triggered. A formatter receives the
+        structured trigger and returns either the message content (str) or a full message
+        dict (for example with a list of content blocks).
+
+        Example:
+            @bot.format_input
+            async def as_xml(trigger: TriggerInput, context: MessageContext) -> str:
+                earlier = "\\n".join(f"<msg from='{m.display_name}'>{m.text}</msg>"
+                                      for m in trigger.backfill)
+                return f"<backfill>{earlier}</backfill><request>{trigger.request}</request>"
+
+        Args:
+            func: Function (TriggerInput[, MessageContext]) -> str | dict, sync or async
+
+        Returns:
+            The function (for decorator usage)
+        """
+        self._input_formatter = func
+        return func
 
     def transform_config(self, func: Callable) -> Callable:
         """Decorator to add a config transformer.
@@ -1003,12 +1057,14 @@ class SlackBot:
             message = trigger.message
             context = MessageContext(event=message, trigger=trigger)
 
-            # Extract message text
-            message_text = message.get("text", "")
-
-            # Remove bot mention from text if present
-            if self._bot_user_id:
-                message_text = message_text.replace(f"<@{self._bot_user_id}>", "").strip()
+            # The request as markdown (without the agent's own mention), who asked, and
+            # any backfill from the Slack thread
+            normalized = await self._normalizer.normalize(
+                message, strip_mention_of=self._bot_user_id
+            )
+            message_text = normalized.text
+            context.requested_by = await self._requested_by(context, normalized)
+            context.backfill = tuple(await self._collect_backfill(context, trigger))
 
             # Start user-processing reactions in background (don't block handler)
             user_processing_reactions = self._get_reactions_for("user", "processing")
@@ -1226,6 +1282,12 @@ class SlackBot:
                 raise
 
             finally:
+                if success:
+                    await self._backfill.advance(
+                        context.channel_id,
+                        context.conversation_ts,
+                        trigger.occurred_ts or context.message_ts,
+                    )
                 # Only remove non-persistent user reactions on success
                 # On error, keep them as visual indicators that something went wrong
                 if success:
@@ -1432,6 +1494,48 @@ class SlackBot:
                 logger.exception(f"Error opening tool call details modal: {e}")
 
         logger.info("Slack event handlers registered")
+
+    async def _requested_by(
+        self, context: MessageContext, trigger_message: NormalizedMessage
+    ) -> RequestedBy:
+        """Who the request line names: the requester, or else the triggering bot."""
+        if context.requester_id:
+            name = await self._normalizer.user_name(context.requester_id)
+            return RequestedBy(name, context.requester_id, "human")
+        return RequestedBy(
+            trigger_message.display_name, trigger_message.author_id, trigger_message.author_type
+        )
+
+    async def _collect_backfill(
+        self, context: MessageContext, trigger: Trigger
+    ) -> list[NormalizedMessage]:
+        return await self._backfill.collect(
+            channel_id=context.channel_id,
+            conversation_ts=context.conversation_ts,
+            trigger_ts=context.message_ts,
+            thread_id=self.handler.conversation_thread_id(context),
+            identity=await self._get_identity(),
+            until_ts=trigger.occurred_ts,
+        )
+
+    async def _build_run_input(self, request: str, context: MessageContext) -> dict:
+        """The single human message the run receives (ADR-0009)."""
+        requested_by = context.requested_by or RequestedBy(
+            context.author_id or "unknown",
+            context.requester_id or context.author_id,
+            context.author_type,
+        )
+        trigger = TriggerInput(
+            request=request,
+            trigger_kind=context.trigger_kind,
+            requested_by=requested_by,
+            provenance=context.provenance,
+            backfill=context.backfill,
+        )
+        if not self._input_formatter:
+            return default_framer(trigger)
+        result = await call_hook(self._input_formatter, trigger, context)
+        return result if isinstance(result, dict) else {"role": "user", "content": result}
 
     async def _remember_reply(
         self, context: MessageContext, reply_ts: str, thread_id: str, run_id: str

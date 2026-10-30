@@ -122,7 +122,28 @@ class FakeSlackWorkspace:
         }
 
     def _conversations_replies(self, args: dict) -> dict:
-        return {"ok": True, "messages": self.thread(args["channel"], args["ts"])}
+        messages = sorted(self.thread(args["channel"], args["ts"]), key=lambda m: _ts(m["ts"]))
+        if args.get("oldest"):
+            # Slack's `oldest` is exclusive unless `inclusive` is set
+            oldest = _ts(args["oldest"])
+            messages = [
+                m
+                for m in messages
+                if _ts(m["ts"]) > oldest or (args.get("inclusive") and _ts(m["ts"]) == oldest)
+            ]
+        return {"ok": True, "messages": messages, "has_more": False}
+
+    def _users_info(self, args: dict) -> dict:
+        user = self.users.get(args["user"])
+        if user is None:
+            return {"ok": False, "error": "user_not_found"}
+        return {"ok": True, "user": {"id": args["user"], **user}}
+
+    def _conversations_info(self, args: dict) -> dict:
+        channel = self.channels.get(args["channel"])
+        if channel is None:
+            return {"ok": False, "error": "channel_not_found"}
+        return {"ok": True, "channel": {"id": args["channel"], **channel}}
 
     def _post_as_agent(self, args: dict) -> dict:
         channel = args["channel"]
@@ -152,6 +173,11 @@ class FakeSlackWorkspace:
 
     def _chat_stopStream(self, args: dict) -> dict:
         return {"ok": True, "channel": args["channel"], "ts": args["ts"]}
+
+
+def _ts(ts: str) -> tuple[int, int]:
+    seconds, _, micros = ts.partition(".")
+    return int(seconds), int(micros or 0)
 
 
 # ============================================================================
@@ -194,9 +220,39 @@ class RunRequest:
     def slack_config(self) -> dict:
         return (self.config or {}).get("configurable", {}).get("slack", {})
 
+    @property
+    def request(self) -> str:
+        """The request part of the framed input: what follows the "Request from ..." line."""
+        _, _, request_section = self.text.rpartition("Request from ")
+        _, _, request = request_section.partition("\n")
+        return request
 
-class ThreadNotFound(Exception):
-    pass
+    @property
+    def backfill(self) -> list["ContextLine"]:
+        """The messages in the framed input's untrusted context section."""
+        if "<slack_context" not in self.text:
+            return []
+        section = self.text.split("</slack_context>")[0]
+        return [ContextLine.parse(line) for line in section.splitlines() if line.startswith("[")]
+
+
+@dataclass
+class ContextLine:
+    """One backfill line: "[time] Name (ID, human|bot): text"."""
+
+    time: str
+    display_name: str
+    author_id: str
+    author_type: str
+    text: str
+
+    @classmethod
+    def parse(cls, line: str) -> "ContextLine":
+        time_part, _, rest = line[1:].partition("] ")
+        who, _, text = rest.partition("): ")
+        name, _, ids = who.rpartition(" (")
+        author_id, _, author_type = ids.partition(", ")
+        return cls(time_part, name, author_id, author_type, text)
 
 
 class _FakeRuns:
@@ -268,7 +324,10 @@ class _FakeThreads:
 
     async def get(self, thread_id, **kwargs):
         if thread_id not in self._d.threads_by_id:
-            raise ThreadNotFound(thread_id)
+            request = httpx.Request("GET", f"http://fake/threads/{thread_id}")
+            raise NotFoundError(
+                "thread not found", response=httpx.Response(404, request=request), body=None
+            )
         return self._d.threads_by_id[thread_id]
 
     async def create(self, *, thread_id=None, if_exists=None, **kwargs):

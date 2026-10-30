@@ -89,12 +89,12 @@ async def test_tool_call_details_open_after_a_restart(make_bridge, deployment, s
 
 
 async def test_joined_thread_is_remembered_without_reading_slack_history(make_bridge):
-    bridge = make_bridge()
+    bridge = make_bridge(backfill=False)
     await bridge.send_event(
         bridge.message("C0CHAN", f"{MENTION} hi", channel_type="channel", ts="1600000000.000001")
     )
 
-    restarted = make_bridge()
+    restarted = make_bridge(backfill=False)
     restarted.slack.calls.clear()
     await restarted.send_event(
         restarted.message(
@@ -102,12 +102,12 @@ async def test_joined_thread_is_remembered_without_reading_slack_history(make_br
         )
     )
 
-    assert [r.text for r in restarted.runs] == ["hi", "follow-up"]
+    assert [r.request for r in restarted.runs] == ["hi", "follow-up"]
     assert restarted.slack.calls_to("conversations.replies") == []
 
 
 async def test_proactive_message_thread_counts_as_joined(make_bridge):
-    bridge = make_bridge()
+    bridge = make_bridge(backfill=False)
     ts = await bridge.bot.send_proactive_message("C0CHAN", "Deploy finished")
     bridge.slack.calls.clear()
 
@@ -115,12 +115,12 @@ async def test_proactive_message_thread_counts_as_joined(make_bridge):
         bridge.message("C0CHAN", "thanks, any errors?", channel_type="channel", thread_ts=ts)
     )
 
-    assert [r.text for r in bridge.runs] == ["thanks, any errors?"]
+    assert [r.request for r in bridge.runs] == ["thanks, any errors?"]
     assert bridge.slack.calls_to("conversations.replies") == []
 
 
 async def test_thread_found_in_slack_history_is_remembered(make_bridge):
-    bridge = make_bridge()
+    bridge = make_bridge(backfill=False)
     bridge.slack.add_message("C0CHAN", {"ts": "1600000000.000001", "user": "U0HUMAN", "text": "p"})
     bridge.slack.add_message(
         "C0CHAN",
@@ -131,7 +131,7 @@ async def test_thread_found_in_slack_history_is_remembered(make_bridge):
     await bridge.send_event(bridge.message("C0CHAN", "one", **reply))
     await bridge.send_event(bridge.message("C0CHAN", "two", **reply))
 
-    assert [r.text for r in bridge.runs] == ["one", "two"]
+    assert [r.request for r in bridge.runs] == ["one", "two"]
     assert len(bridge.slack.calls_to("conversations.replies")) == 1
 
 
@@ -173,7 +173,7 @@ async def test_distinct_events_each_start_a_run(make_bridge):
     await bridge.send_event(bridge.message("D0DM", "one", channel_type="im"), event_id="Ev1")
     await bridge.send_event(bridge.message("D0DM", "two", channel_type="im"), event_id="Ev2")
 
-    assert [r.text for r in bridge.runs] == ["one", "two"]
+    assert [r.request for r in bridge.runs] == ["one", "two"]
 
 
 async def test_duplicate_records_expire(make_bridge, deployment):
@@ -284,7 +284,7 @@ async def test_redelivery_without_event_id_is_suppressed_by_message_and_kind(mak
 
 
 async def test_top_level_reply_starts_a_joined_thread(make_bridge):
-    bridge = make_bridge(reply_in_thread=False)
+    bridge = make_bridge(reply_in_thread=False, backfill=False)
     await bridge.send_event(bridge.message("C0CHAN", f"{MENTION} hi", channel_type="channel"))
     reply_ts = bridge.agent_messages("C0CHAN")[-1]["ts"]
     bridge.slack.calls.clear()
@@ -293,7 +293,7 @@ async def test_top_level_reply_starts_a_joined_thread(make_bridge):
         bridge.message("C0CHAN", "about that", channel_type="channel", thread_ts=reply_ts)
     )
 
-    assert [r.text for r in bridge.runs] == ["hi", "about that"]
+    assert [r.request for r in bridge.runs] == ["hi", "about that"]
     assert bridge.slack.calls_to("conversations.replies") == []
 
 
@@ -424,7 +424,7 @@ async def test_store_failure_after_startup_fails_over_and_recovers(make_bridge, 
     reply_ts = bridge.agent_messages("D0DM")[-1]["ts"]
     await bridge.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
 
-    assert [r.text for r in bridge.runs] == ["warm-up", "hello"]
+    assert [r.request for r in bridge.runs] == ["warm-up", "hello"]
     assert bridge.feedback_submitted[-1]["run_id"] == bridge.runs[-1].run_id
 
     deployment.store.reachable = True
@@ -454,7 +454,7 @@ async def test_a_failing_store_never_aborts_a_run(make_bridge, deployment):
 
     await bridge.send_event(bridge.message("D0DM", "hello", channel_type="im"))
 
-    assert [r.text for r in bridge.runs] == ["warm-up", "hello"]
+    assert [r.request for r in bridge.runs] == ["warm-up", "hello"]
     assert bridge.agent_messages("D0DM")
 
 
