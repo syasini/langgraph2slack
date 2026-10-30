@@ -12,6 +12,7 @@ from typing import Optional
 
 from ..config import MessageContext
 from ..mixins import ReactionMixin
+from ..state import BridgeState
 from ..tool_calls import ToolCallTracker
 from ..transformers import TransformerChain
 from ..utils import (
@@ -107,7 +108,7 @@ class StreamingHandler(BaseHandler):
         stream_buffer_max_chunks: int = 10,
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
-        tool_call_store: Optional[dict] = None,
+        state: Optional[BridgeState] = None,
         multitask_strategy: str = "interrupt",
         delete_interrupted_messages: bool = True,
     ):
@@ -133,7 +134,7 @@ class StreamingHandler(BaseHandler):
                 Buffer flushes when EITHER stream_buffer_time elapses OR this limit is reached.
             show_tool_calls: Show live plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output + View Details button (default: True)
-            tool_call_store: Shared dict (from SlackBot) mapping plan_ts -> list[ActiveToolCall]
+            state: Bridge state where tool-call details are saved for "View Full Details"
             multitask_strategy: Strategy for concurrent runs on the same thread, passed to
                 runs.stream() (default: "interrupt"). See SlackBot for details.
             delete_interrupted_messages: Delete (rather than freeze) the partial Slack message
@@ -150,7 +151,7 @@ class StreamingHandler(BaseHandler):
             max_image_blocks=max_image_blocks,
             show_tool_calls=show_tool_calls,
             show_tool_call_details=show_tool_call_details,
-            tool_call_store=tool_call_store,
+            state=state,
         )
         # Store handler-specific attributes
         self.langgraph_client = langgraph_client
@@ -477,10 +478,7 @@ class StreamingHandler(BaseHandler):
                 text="Working on it...",
                 blocks=[plan_block],
             )
-            plan_ts = response.get("ts")
-            if plan_ts:
-                self.tool_call_store[plan_ts] = calls
-            return plan_ts
+            return response.get("ts")
         except Exception as e:
             logger.error(f"Failed to post plan block: {e}", exc_info=True)
             return None
@@ -511,7 +509,6 @@ class StreamingHandler(BaseHandler):
                 text="Working on it...",
                 blocks=[plan_block],
             )
-            self.tool_call_store[plan_ts] = calls
         except Exception as e:
             logger.warning(f"Failed to update plan block: {e}")
 
@@ -545,7 +542,7 @@ class StreamingHandler(BaseHandler):
                 text="Done",
                 blocks=blocks,
             )
-            self.tool_call_store[plan_ts] = calls
+            await self.state.save_tool_calls(plan_ts, calls)
         except Exception as e:
             logger.warning(f"Failed to finalize plan block: {e}")
 

@@ -7,7 +7,7 @@ sets up Slack handlers, and coordinates between Slack and LangGraph.
 import asyncio
 import json
 import logging
-from typing import Callable, Dict, Optional
+from typing import Callable, Optional
 
 from fastapi import FastAPI, Request
 from langgraph_sdk import get_client
@@ -19,6 +19,7 @@ from slack_bolt.async_app import AsyncApp
 from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
+from .state import BridgeState, DeploymentStateStore, StateStore
 from .transformers import DictTransformerChain, TransformerChain
 from .triggers import BridgeIdentity, TriggerGate
 from .utils import (
@@ -131,6 +132,7 @@ class SlackBot:
         show_tool_call_details: bool = True,
         multitask_strategy: Optional[str] = None,
         delete_interrupted_messages: bool = True,
+        state_store: Optional[StateStore] = None,
     ):
         """Initialize SlackBot.
 
@@ -212,6 +214,11 @@ class SlackBot:
                 the thread history holds no partial AI message to be out of sync with. Set to
                 False to keep (finalize) the partial message, matching legacy behavior. If your
                 graph persists partial output to thread state, prefer False.
+            state_store: Where the bridge keeps its memory (feedback mappings, tool-call
+                details, joined threads, duplicate records). Default: the deployment's
+                LangGraph store, or a bounded in-memory store (with a warning) when no store
+                is reachable. Pass any object implementing ``StateStore`` to use your own
+                storage.
         """
         logger.info("Initializing SlackBot...")
 
@@ -243,11 +250,6 @@ class SlackBot:
         self.show_tool_calls = show_tool_calls
         self.show_tool_call_details = show_tool_call_details
 
-        # Shared store for tool call data used by the "View Full Details" modal.
-        # Maps plan_ts (Slack message timestamp) -> list[ActiveToolCall].
-        # Passed by reference to both handlers so they can write to it.
-        self.tool_call_store: Dict[str, list] = {}
-
         # Normalize reaction configs (handle backward compatibility)
         self.reactions = self._normalize_reactions(processing_reaction, reactions)
 
@@ -260,13 +262,15 @@ class SlackBot:
         # Initialize LangSmith client for feedback
         self.langsmith_client = Client()
 
-        # Map Slack message identifiers to LangGraph run information for feedback
-        # Key: "{channel_id}:{message_ts}", Value: {"thread_id": str, "run_id": str}
-        self.message_run_mapping: Dict[str, Dict[str, str]] = {}
-
         # Initialize LangGraph client
         self.langgraph_client = get_client(url=self.config.LANGGRAPH_URL)
         logger.info(f"LangGraph client initialized (url={self.config.LANGGRAPH_URL or 'loopback'})")
+
+        # Durable bridge state (feedback mappings, tool-call details, joined threads, ...)
+        self.state = BridgeState(
+            state_store
+            or DeploymentStateStore(self.langgraph_client, scope=self.config.ASSISTANT_ID)
+        )
 
         # Initialize Slack app
         self.slack_app = AsyncApp(
@@ -298,7 +302,7 @@ class SlackBot:
                 stream_buffer_max_chunks=stream_buffer_max_chunks,
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
-                tool_call_store=self.tool_call_store,
+                state=self.state,
                 multitask_strategy=self.multitask_strategy,
                 delete_interrupted_messages=self.delete_interrupted_messages,
             )
@@ -319,7 +323,7 @@ class SlackBot:
                 reply_in_thread=self.reply_in_thread,
                 show_tool_calls=self.show_tool_calls,
                 show_tool_call_details=self.show_tool_call_details,
-                tool_call_store=self.tool_call_store,
+                state=self.state,
                 multitask_strategy=self.multitask_strategy,
             )
             logger.info("Using MessageHandler (non-streaming)")
@@ -338,7 +342,7 @@ class SlackBot:
         self._slack_metadata_initialized = False
 
         # Decides which Slack payloads start a run
-        self._trigger_gate = TriggerGate(self.slack_app.client, self._get_identity)
+        self._trigger_gate = TriggerGate(self.slack_app.client, self._get_identity, self.state)
 
         # Background task tracking for proper cleanup
         self._background_tasks: set[asyncio.Task] = set()
@@ -428,6 +432,7 @@ class SlackBot:
 
         continuation_ts = thread_ts or message_ts
         thread_id = self.handler._create_thread_id(channel, continuation_ts)
+        await self.state.mark_joined(channel, continuation_ts)
 
         await self.langgraph_client.threads.create(
             thread_id=thread_id,
@@ -958,11 +963,11 @@ class SlackBot:
 
         # Handler for message events
         @self.slack_app.event("message")
-        async def handle_message_event(event: dict, say, ack):
+        async def handle_message_event(event: dict, say, ack, body: dict):
             """Handle incoming message events."""
             await ack()  # Acknowledge receipt immediately
 
-            trigger = await self._trigger_gate.evaluate(event)
+            trigger = await self._trigger_gate.evaluate(event, event_id=body.get("event_id"))
             if trigger is None:
                 logger.debug(f"Ignoring message: {event.get('text', '')[:50]}")
                 return
@@ -1012,14 +1017,7 @@ class SlackBot:
 
                     # Store mapping for feedback
                     if run_id and stream_ts:
-                        message_key = f"{context.channel_id}:{stream_ts}"
-                        self.message_run_mapping[message_key] = {
-                            "thread_id": thread_id,
-                            "run_id": run_id,
-                        }
-                        logger.info(
-                            f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}"
-                        )
+                        await self._remember_reply(context, stream_ts, thread_id, run_id)
                     else:
                         logger.warning("No run_id captured for streaming message")
 
@@ -1168,14 +1166,7 @@ class SlackBot:
 
                     # Store mapping for feedback
                     if run_id and result and result.get("ts"):
-                        message_key = f"{context.channel_id}:{result['ts']}"
-                        self.message_run_mapping[message_key] = {
-                            "thread_id": thread_id,
-                            "run_id": run_id,
-                        }
-                        logger.info(
-                            f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}"
-                        )
+                        await self._remember_reply(context, result["ts"], thread_id, run_id)
                     else:
                         logger.warning("No run_id captured for non-streaming message")
 
@@ -1247,7 +1238,7 @@ class SlackBot:
                 )
 
                 # Look up run_id from message mapping
-                run_id = self._lookup_run_id(channel_id, message_ts)
+                run_id = await self._lookup_run_id(channel_id, message_ts)
                 if not run_id:
                     return
 
@@ -1315,7 +1306,7 @@ class SlackBot:
             """Open a modal with full untruncated tool call inputs and outputs.
 
             The plan_ts stored in the button value is used to look up the tool call
-            data from self.tool_call_store, which is populated by the handlers during
+            data from the bridge state, which the handlers populate during
             streaming or after non-streaming completion.
             """
             await ack()
@@ -1324,7 +1315,7 @@ class SlackBot:
                 action = body.get("actions", [{}])[0]
                 plan_ts = action.get("value", "")
 
-                tool_calls = self.tool_call_store.get(plan_ts, [])
+                tool_calls = await self.state.tool_calls(plan_ts)
                 if not tool_calls:
                     logger.warning(f"No tool call data found for plan_ts={plan_ts}")
                     await client.views_open(
@@ -1412,8 +1403,28 @@ class SlackBot:
 
         logger.info("Slack event handlers registered")
 
-    def _lookup_run_id(self, channel_id: str, message_ts: str) -> Optional[str]:
-        """Look up run_id from message mapping.
+    async def _remember_reply(
+        self, context: MessageContext, reply_ts: str, thread_id: str, run_id: str
+    ) -> None:
+        """Remember a reply the bridge posted: its run (for feedback) and its thread (joined).
+
+        Args:
+            context: Context of the trigger the reply answers
+            reply_ts: Timestamp of the bridge's reply message
+            thread_id: LangGraph thread ID
+            run_id: LangGraph run ID
+        """
+        await self.state.remember_run(context.channel_id, reply_ts, thread_id, run_id)
+        logger.info(f"Stored feedback mapping: {context.channel_id}:{reply_ts} -> run_id={run_id}")
+
+        # The reply sits in the trigger's thread, or (when posted top-level) starts its own
+        reply_thread_ts = context.thread_ts or (
+            context.message_ts if self.reply_in_thread else None
+        )
+        await self.state.mark_joined(context.channel_id, reply_thread_ts or reply_ts)
+
+    async def _lookup_run_id(self, channel_id: str, message_ts: str) -> Optional[str]:
+        """Look up the run that produced a Slack message.
 
         Args:
             channel_id: Slack channel ID
@@ -1422,14 +1433,10 @@ class SlackBot:
         Returns:
             run_id if found, None otherwise
         """
-        message_key = f"{channel_id}:{message_ts}"
-        run_info = self.message_run_mapping.get(message_key)
-
+        run_info = await self.state.run_for_message(channel_id, message_ts)
         if not run_info:
-            logger.error(f"No run mapping found for message key: {message_key}")
-            logger.error(f"Available mappings: {list(self.message_run_mapping.keys())}")
+            logger.warning(f"No run mapping found for message {channel_id}:{message_ts}")
             return None
-
         return run_info["run_id"]
 
     async def _submit_feedback(

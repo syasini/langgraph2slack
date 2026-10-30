@@ -8,6 +8,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from ..config import MessageContext
+from ..state import BridgeState
 from ..tool_calls import ActiveToolCall
 from ..transformers import TransformerChain
 from ..utils import clean_markdown, create_plan_block, create_tool_details_button
@@ -46,7 +47,7 @@ class MessageHandler(BaseHandler):
         reply_in_thread: bool = True,
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
-        tool_call_store: Optional[Dict] = None,
+        state: Optional[BridgeState] = None,
         multitask_strategy: str = "interrupt",
     ):
         """Initialize message handler.
@@ -66,7 +67,7 @@ class MessageHandler(BaseHandler):
             reply_in_thread: Reply in thread vs main channel (default: True)
             show_tool_calls: Show plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output + View Details button (default: True)
-            tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall]
+            state: Bridge state where tool-call details are saved for "View Full Details"
             multitask_strategy: Strategy for concurrent runs on the same thread, passed to
                 runs.create() (default: "interrupt"). See SlackBot for details.
         """
@@ -81,7 +82,7 @@ class MessageHandler(BaseHandler):
             max_image_blocks=max_image_blocks,
             show_tool_calls=show_tool_calls,
             show_tool_call_details=show_tool_call_details,
-            tool_call_store=tool_call_store,
+            state=state,
         )
         # Store handler-specific attributes
         self.client = langgraph_client
@@ -280,7 +281,7 @@ class MessageHandler(BaseHandler):
                 )
                 plan_ts = response.get("ts")
                 if plan_ts:
-                    self.tool_call_store[plan_ts] = calls
+                    await self.state.save_tool_calls(plan_ts, calls)
                     # Update with the View Details button (now we know plan_ts)
                     blocks_with_button = [plan_block, create_tool_details_button(plan_ts)]
                     await self.slack_client.client.chat_update(

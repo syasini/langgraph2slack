@@ -9,6 +9,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from ..config import MessageContext
+from ..state import BridgeState, InMemoryStateStore
 from ..transformers import TransformerChain
 from ..utils import create_feedback_block, extract_markdown_images
 
@@ -33,7 +34,7 @@ class BaseHandler:
         max_image_blocks: int = 5,
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
-        tool_call_store: Optional[Dict] = None,
+        state: Optional[BridgeState] = None,
     ):
         """Initialize base handler.
 
@@ -47,8 +48,8 @@ class BaseHandler:
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             show_tool_calls: Show plan block with tool call status (default: False)
             show_tool_call_details: Show truncated input/output preview + View Details button (default: True)
-            tool_call_store: Shared dict mapping plan_ts -> list[ActiveToolCall] for the
-                             "View Full Details" modal. Passed by reference from SlackBot.
+            state: Bridge state where tool-call details are saved for the "View Full Details"
+                modal (default: a private in-memory store)
         """
         self.assistant_id = assistant_id
         self.input_transformers = input_transformers
@@ -59,8 +60,7 @@ class BaseHandler:
         self.max_image_blocks = max_image_blocks
         self.show_tool_calls = show_tool_calls
         self.show_tool_call_details = show_tool_call_details
-        # Shared store: plan_ts -> list[ActiveToolCall]; same dict reference across bot + handlers
-        self.tool_call_store: Dict = tool_call_store if tool_call_store is not None else {}
+        self.state = state if state is not None else BridgeState(InMemoryStateStore())
 
     async def _apply_input_transforms(
         self,
