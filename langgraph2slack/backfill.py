@@ -78,7 +78,7 @@ class BackfillCollector:
         thread_id: str,
         identity: BridgeIdentity,
         until_ts: Optional[str] = None,
-        include_trigger_message: bool = False,
+        subject: Optional[dict] = None,
     ) -> list[NormalizedMessage]:
         """The backfill for a trigger, oldest first (empty when backfill is off).
 
@@ -90,31 +90,35 @@ class BackfillCollector:
             identity: The bridge's own Slack identity
             until_ts: When the trigger happened, if later than ``trigger_ts`` (an edit):
                 messages up to then count as earlier
-            include_trigger_message: Hand the trigger's message over as context too (the
-                message shortcut, where that message is what the agent is asked about)
+            subject: The message the trigger asks about (the message shortcut's target). It's
+                always part of the backfill, kept within the budget first.
         """
         if not self.enabled:
             return []
         until = ts_key(until_ts or trigger_ts)
         first_contact = not await self._conversation_exists(thread_id)
+        subject_ts = subject.get("ts") if subject else None
+        parent_ts = conversation_ts if first_contact else None
 
-        if first_contact and conversation_ts == trigger_ts and until_ts is None:
-            if not include_trigger_message:
-                return []  # a top-level trigger starts its thread: nothing came before it
+        if first_contact and conversation_ts == trigger_ts and until_ts is None and not subject:
+            return []  # a top-level trigger starts its thread: nothing came before it
 
         def wanted(message: dict) -> bool:
+            if message.get("ts") == subject_ts:
+                return True
             if message.get("ts") == trigger_ts:
-                return include_trigger_message
+                return False
             return ts_key(message.get("ts")) < until
 
-        parent_ts = conversation_ts if first_contact else None
+        marker = None if first_contact else await self._state.last_seen(channel_id, conversation_ts)
+        # With a marker, only messages after it need reading
+        messages = await self._thread_messages(channel_id, conversation_ts, oldest=marker)
+        if subject and not any(m.get("ts") == subject_ts for m in messages):
+            # Not read from the thread (unreadable, or before the marker): use the payload's copy
+            messages = sorted([*messages, subject], key=lambda m: ts_key(m.get("ts")))
         if first_contact:
-            messages = await self._thread_messages(channel_id, conversation_ts)
             earlier = [m for m in messages if wanted(m)]
         else:
-            marker = await self._state.last_seen(channel_id, conversation_ts)
-            # With a marker, only messages after it need reading
-            messages = await self._thread_messages(channel_id, conversation_ts, oldest=marker)
             if marker is None:
                 marker = self._last_reply_ts(messages, identity)
             earlier = [
@@ -122,7 +126,7 @@ class BackfillCollector:
                 for m in messages
                 if wanted(m)
                 and (
-                    (include_trigger_message and m.get("ts") == trigger_ts)
+                    m.get("ts") == subject_ts
                     or (
                         (marker is None or ts_key(m.get("ts")) > ts_key(marker))
                         and not identity.authored(m)
@@ -130,21 +134,16 @@ class BackfillCollector:
                 )
             ]
 
-        # Leave out messages that started runs of their own (the parent and a message the
-        # agent is asked about stay)
-        def exempt(message: dict) -> bool:
-            ts = message.get("ts")
-            return ts == parent_ts or (include_trigger_message and ts == trigger_ts)
-
+        # The thread's parent (first contact) and the subject, once each, always stay; other
+        # messages that started runs of their own are left out
+        keep = list(dict.fromkeys(ts for ts in (parent_ts, subject_ts) if ts))
+        checked = [m for m in earlier if m.get("ts") not in keep]
         started = await asyncio.gather(
-            *(self._state.has_started(channel_id, m.get("ts")) for m in earlier if not exempt(m))
+            *(self._state.has_started(channel_id, m.get("ts")) for m in checked)
         )
-        started_ts = {
-            m.get("ts") for m, s in zip([m for m in earlier if not exempt(m)], started) if s
-        }
+        started_ts = {m.get("ts") for m, was_started in zip(checked, started) if was_started}
         earlier = [m for m in earlier if m.get("ts") not in started_ts]
-
-        return await self._within_budget(earlier, keep_ts=parent_ts)
+        return await self._within_budget(earlier, keep=keep)
 
     async def advance(self, channel_id: str, conversation_ts: str, seen_ts: str) -> None:
         """Move the conversation's last-seen marker forward to ``seen_ts``."""
@@ -154,11 +153,12 @@ class BackfillCollector:
                 await self._state.set_last_seen(channel_id, conversation_ts, seen_ts)
 
     async def _within_budget(
-        self, messages: list[dict], keep_ts: Optional[str] = None
+        self, messages: list[dict], keep: list[str] = ()
     ) -> list[NormalizedMessage]:
         """The most recent messages that fit both budgets, normalized, oldest first.
 
-        The message at ``keep_ts`` (the thread's parent) is kept first. A message too long
+        The messages at the ``keep`` timestamps (the thread's parent, the subject) are kept
+        first. A message too long
         for the remaining budget is truncated to fit when enough room is left. Messages are
         normalized newest first and only until the budget is spent, so files on messages
         that won't fit are never downloaded.
@@ -209,11 +209,11 @@ class BackfillCollector:
             remaining -= overhead + len(message.text) + files_cost
             return True
 
-        parent = next((m for m in messages if keep_ts and m.get("ts") == keep_ts), None)
-        if parent is not None:
-            await take(parent)
+        kept_first = [m for ts in keep for m in messages if m.get("ts") == ts]
+        for message in kept_first:
+            await take(message)
         for message in reversed(messages):
-            if message is parent:
+            if any(message is k for k in kept_first):
                 continue
             if not await take(message):
                 break

@@ -512,10 +512,16 @@ class BridgeState:
     # -- duplicate suppression ---------------------------------------------
 
     async def claim_trigger(
-        self, event_id: Optional[str], channel_id: str, message_ts: str, trigger_kind: str
+        self,
+        event_id: Optional[str],
+        channel_id: str,
+        message_ts: str,
+        trigger_kind: str,
+        mark_started: bool = True,
     ) -> bool:
-        """Record that a trigger is being handled, and that its message started a run (the
-        edit rule checks this). False if the trigger was already recorded.
+        """Record that a trigger is being handled and, unless ``mark_started`` is False, that
+        its message started a run (the edit rule checks this). False if the trigger was
+        already recorded.
 
         The key is the Events API event ID when present, otherwise the message and trigger
         kind. Best effort across replicas: the store has no compare-and-set, so two
@@ -525,10 +531,12 @@ class BridgeState:
         async with self._claim_locks.hold(key):
             if await self._get(self.DEDUPE, key) is not None:
                 return False
-            await asyncio.gather(
-                self._put(self.DEDUPE, key, {}),
-                self._put(self.STARTED, self._message_key(channel_id, message_ts), {}),
-            )
+            writes = [self._put(self.DEDUPE, key, {})]
+            if mark_started:
+                writes.append(
+                    self._put(self.STARTED, self._message_key(channel_id, message_ts), {})
+                )
+            await asyncio.gather(*writes)
             return True
 
     async def has_started(self, channel_id: str, message_ts: str) -> bool:

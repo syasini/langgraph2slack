@@ -12,6 +12,11 @@ features:
     always_online: true
   assistant_view:
     assistant_description: AI-powered plant care assistant
+  shortcuts:
+    - name: Ask agent about this
+      type: message
+      callback_id: ask_agent
+      description: Ask the agent about this message
 oauth_config:
   scopes:
     bot:
