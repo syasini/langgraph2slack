@@ -34,9 +34,12 @@ def slack():
     patcher = route_slack_api(workspace)
     # Private file downloads go to the workspace too, over a mock HTTP transport
     transport = httpx.MockTransport(workspace.serve_file)
-    with patch(
-        "langgraph2slack.files._new_client",
-        lambda: httpx.AsyncClient(transport=transport, follow_redirects=True),
+    with (
+        patch(
+            "langgraph2slack.files._new_client",
+            lambda: httpx.AsyncClient(transport=transport, follow_redirects=True),
+        ),
+        patch("langgraph2slack.bot.post_response_url", workspace.post_response_url),
     ):
         yield workspace
     patcher.stop()

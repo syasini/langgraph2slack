@@ -3,8 +3,13 @@
 Helper functions for message formatting, markdown conversion, and event detection.
 """
 
+import logging
 import re
 from typing import Dict, List, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
 
 # Action ID for the "View Full Details" button in plan block messages
 TOOL_CALL_DETAILS_ACTION_ID = "tool_call_details"
@@ -466,3 +471,17 @@ def extract_feedback_text(view_state: Dict) -> str:
     except Exception:
         # Return empty string if extraction fails
         return ""
+
+
+async def post_response_url(response_url: Optional[str], text: str) -> None:
+    """Show the user who triggered an interaction a private (ephemeral) message.
+
+    Works where the app can't post itself, which is why it's used to explain failures.
+    """
+    if not response_url:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(response_url, json={"response_type": "ephemeral", "text": text})
+    except Exception as e:
+        logger.warning(f"Could not post to response_url: {e}")
