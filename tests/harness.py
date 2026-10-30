@@ -142,6 +142,9 @@ class FakeSlackWorkspace:
         return self._post_as_agent(args)
 
     def _chat_startStream(self, args: dict) -> dict:
+        # Slack requires a recipient user (and team) to open a stream
+        if not args.get("recipient_user_id") or not args.get("recipient_team_id"):
+            return {"ok": False, "error": "invalid_arguments"}
         return self._post_as_agent(args)
 
     def _chat_update(self, args: dict) -> dict:
