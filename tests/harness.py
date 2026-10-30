@@ -66,7 +66,12 @@ class FakeSlackWorkspace:
         # channel_id -> list of message dicts (top-level and replies, in ts order)
         self.messages: dict[str, list[dict]] = {}
         self.users: dict[str, dict] = {}
-        self.channels: dict[str, dict] = {}
+        # The app is a member of #general (C0CHAN); other conversations are unknown to it
+        self.channels: dict[str, dict] = {
+            "C0CHAN": {"name": "general", "is_channel": True, "is_member": True}
+        }
+        # Ephemeral messages sent through interaction response URLs: (url, text)
+        self.responses: list[tuple[str, str]] = []
         self.failing_methods: dict[str, str] = {}
         # url -> (content, content type) for private file downloads
         self.file_contents: dict[str, tuple[bytes, str]] = {}
@@ -134,6 +139,9 @@ class FakeSlackWorkspace:
             return httpx.Response(404)
         content, content_type = self.file_contents[url]
         return httpx.Response(200, headers={"content-type": content_type}, content=content)
+
+    async def post_response_url(self, response_url, text: str) -> None:
+        self.responses.append((response_url, text))
 
     def fail(self, method: str, error: str = "fatal_error") -> None:
         """Make every call to ``method`` fail with a Slack API error."""

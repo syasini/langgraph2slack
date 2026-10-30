@@ -61,15 +61,20 @@ class Provenance:
 class Trigger:
     """A Slack event the bridge will start a run for.
 
-    ``message`` is the Slack message the trigger is about, with its channel: the event
-    itself, or for an edit, the message as edited. ``occurred_ts`` is when the trigger
-    happened, when that's later than the message (an edit).
+    ``message`` is the Slack message the trigger is, with its channel: the event itself, or
+    for an edit the message as edited. ``occurred_ts`` is when the trigger happened, when
+    that's later than the message (an edit, a shortcut).
+
+    A trigger can instead ask about another message, its ``subject`` (the message shortcut):
+    then ``request`` is the request text, and the subject is handed over as context.
     """
 
     kind: TriggerKind
     provenance: Provenance
     message: dict
     occurred_ts: Optional[str] = None
+    request: Optional[str] = None
+    subject: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -150,13 +155,58 @@ class TriggerGate:
             trigger = None
         if trigger is None:
             return None
+        return trigger if await self._claim(trigger, event_id) else None
 
+    async def evaluate_shortcut(
+        self, payload: dict, instruction: str, channel_type: str
+    ) -> Optional[Trigger]:
+        """The trigger for the message shortcut used on a message.
+
+        The shortcut is a human's action: that person authored the trigger and is the
+        requester. The message they used it on (any message, a bot's included) is the
+        trigger's subject, handed to the agent as context. The run lands in that message's
+        thread (a new thread under it if it's top-level), and ``instruction`` is the request.
+        """
+        subject = payload.get("message") or {}
+        channel_id = (payload.get("channel") or {}).get("id")
+        requester_id = (payload.get("user") or {}).get("id")
+        if not (subject.get("ts") and channel_id and requester_id):
+            return None
+        subject = {**subject, "channel": channel_id, "channel_type": channel_type}
+        message = {
+            "type": "message",
+            "user": requester_id,
+            "channel": channel_id,
+            "channel_type": channel_type,
+            "ts": subject["ts"],
+            "thread_ts": subject.get("thread_ts") or subject["ts"],
+        }
+        trigger = Trigger(
+            "shortcut",
+            Provenance.from_message(message),
+            message,
+            occurred_ts=payload.get("action_ts"),
+            request=instruction,
+            subject=subject,
+        )
+        # Slack doesn't retry interactivity payloads; the trigger ID still guards against a
+        # double delivery. Without one there's nothing safe to key on, so nothing is claimed.
+        trigger_id = payload.get("trigger_id")
+        if trigger_id and not await self._claim(trigger, f"shortcut:{trigger_id}"):
+            return None
+        return trigger
+
+    async def _claim(self, trigger: Trigger, event_id: Optional[str]) -> bool:
+        """Claim a trigger (False for a redelivery). A trigger whose own message asks is
+        recorded as having started a run (the edit rule checks this); the message a
+        shortcut was used on isn't, since someone else wrote it."""
         channel_id, message_ts = trigger.message.get("channel"), trigger.message.get("ts")
         if not await self._state.claim_trigger(event_id, channel_id, message_ts, trigger.kind):
             logger.info(f"Ignoring duplicate delivery of {event_id or message_ts}")
-            return None
-        await self._state.mark_started(channel_id, message_ts)
-        return trigger
+            return False
+        if trigger.subject is None:
+            await self._state.mark_started(channel_id, message_ts)
+        return True
 
     async def _admit_author(self, message: dict, identity: BridgeIdentity) -> Optional[Provenance]:
         """The message author's provenance if they may trigger the agent at all, else None.
