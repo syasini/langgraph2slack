@@ -11,6 +11,8 @@ from dotenv import find_dotenv
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .triggers import Provenance, Trigger
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,15 +78,22 @@ class MessageContext:
         message_ts: Message timestamp
         thread_ts: Thread timestamp (None if not in thread)
         channel_type: Channel type ('im', 'channel', 'group')
+        trigger_kind: How the run was triggered ('mention', 'direct_message', ...)
+        author_type: 'human' or 'bot'
+        requester_id: The human who triggered the run (None for bot triggers)
     """
 
-    def __init__(self, event: dict):
+    def __init__(self, event: dict, trigger: Optional[Trigger] = None):
         """Initialize context from Slack event.
 
         Args:
             event: Slack event dict from Slack API
+            trigger: The trigger the gate recognized. When omitted, provenance is read
+                from the event itself and ``trigger_kind`` is None.
         """
         self.event = event
+        self._trigger_kind = trigger.kind if trigger else None
+        self._provenance = trigger.provenance if trigger else Provenance.from_message(event)
 
         # Extract basic info from event (no API calls needed)
         self._user_id = event.get("user", "")
@@ -127,3 +136,57 @@ class MessageContext:
     def is_thread(self) -> bool:
         """True if this message is in a thread."""
         return self._thread_ts is not None
+
+    @property
+    def trigger_kind(self) -> Optional[str]:
+        """How the run was triggered: 'mention', 'direct_message', 'joined_thread',
+        'shortcut' or 'edit'."""
+        return self._trigger_kind
+
+    @property
+    def author_type(self) -> str:
+        """'human' or 'bot': who authored the trigger."""
+        return self._provenance.author_type
+
+    @property
+    def author_id(self) -> Optional[str]:
+        """Slack user ID of the trigger's author (a bot user for modern apps; None for
+        classic integrations)."""
+        return self._provenance.author_id
+
+    @property
+    def bot_id(self) -> Optional[str]:
+        """Bot ID of the trigger's author, if a bot authored it."""
+        return self._provenance.bot_id
+
+    @property
+    def app_id(self) -> Optional[str]:
+        """App ID of the trigger's author, if a Slack app authored it."""
+        return self._provenance.app_id
+
+    @property
+    def requester_id(self) -> Optional[str]:
+        """The human who triggered the run, or None for bot triggers."""
+        return self._provenance.requester_id
+
+    def slack_run_config(self) -> dict:
+        """The ``configurable["slack"]`` entry of the run config: the trigger kind, its
+        provenance, and the channel and thread identifiers.
+
+        ``thread_ts`` is Slack's raw thread timestamp (None for a top-level message), as in
+        metadata. ``conversation_ts`` is the root of the Slack thread this conversation maps
+        to: the thread if the trigger is a reply, otherwise the trigger message itself.
+        """
+        return {
+            "trigger_kind": self.trigger_kind,
+            "author_type": self.author_type,
+            "author_id": self.author_id,
+            "bot_id": self.bot_id,
+            "app_id": self.app_id,
+            "requester_id": self.requester_id,
+            "channel_id": self.channel_id,
+            "channel_type": self.channel_type,
+            "message_ts": self.message_ts,
+            "thread_ts": self.thread_ts,
+            "conversation_ts": self.thread_ts or self.message_ts,
+        }

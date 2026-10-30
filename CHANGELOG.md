@@ -10,10 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refreshed `uv.lock` to the latest releases (`langgraph-sdk` 0.4.10, `langsmith` 0.14.14, `slack-bolt` 1.30.0, `slack-sdk` 3.45.0); the full test suite passes unchanged. Declared minimum versions are unchanged.
 - `examples/plant_bot` now targets the latest LangGraph stack (`langgraph` 1.2.18, `langgraph-api` 0.16.9, `langchain` 1.4.7) and requires Python ≥ 3.11 (required by `langgraph-api`).
 
+- The run config is now always a dict carrying `configurable["slack"]` (see Added), even with no config transformers registered; previously it was `None` in that case. Config transformers now receive this pre-filled config instead of `{}`.
+
 ### Added
 - `deepagents` in the `dev` extra (Python ≥ 3.11) for tests against real deep-agent payload shapes. It is not a runtime dependency.
+- **Provenance:** every run now records who triggered it and how.
+  - Default metadata gains `slack_trigger_kind`, `slack_author_type`, `slack_author_id`, `slack_bot_id`, `slack_app_id` and `slack_requester_id`.
+  - The run config always carries a `slack` entry under `configurable` with the same provenance plus channel and thread identifiers, filled in before config transformers run.
+  - `MessageContext` gains `trigger_kind`, `author_type`, `author_id`, `bot_id`, `app_id` and `requester_id`.
+- Test harness with a fake Slack workspace and a fake LangGraph deployment: tests deliver raw, signed Slack payloads through Bolt and assert on the runs started and the Slack calls made.
 
 ### Fixed
+- Message subtypes that can't carry a request (`channel_join`, `channel_topic`, `message_deleted`, `me_message`, ...) no longer trigger a run, for example when a join notice mentions the bot. Only plain messages, `bot_message`, `file_share` and `thread_broadcast` are considered (bot-authored messages are still ignored).
 - `examples/plant_bot` installs `langgraph2slack` from the repo root via `[tool.uv.sources]` instead of a machine-specific absolute path.
 
 ## [0.7.1] - 2026-10-28
