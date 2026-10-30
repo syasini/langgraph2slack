@@ -43,6 +43,7 @@ class MessageHandler(BaseHandler):
         max_image_blocks: int = 5,
         metadata_builder=None,
         config_builder=None,
+        input_builder=None,
         slack_client=None,
         reply_in_thread: bool = True,
         show_tool_calls: bool = False,
@@ -63,6 +64,7 @@ class MessageHandler(BaseHandler):
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
             config_builder: Async function to build config dict from MessageContext
+            input_builder: Async function (request, MessageContext) -> run input message
             slack_client: Slack Bolt AsyncApp (required when show_tool_calls=True)
             reply_in_thread: Reply in thread vs main channel (default: True)
             show_tool_calls: Show plan block with tool call status (default: False)
@@ -83,6 +85,7 @@ class MessageHandler(BaseHandler):
             show_tool_calls=show_tool_calls,
             show_tool_call_details=show_tool_call_details,
             state=state,
+            input_builder=input_builder,
         )
         # Store handler-specific attributes
         self.client = langgraph_client
@@ -333,7 +336,7 @@ class MessageHandler(BaseHandler):
             run = await self.client.runs.create(
                 thread_id=thread_id,
                 assistant_id=self.assistant_id,
-                input={"messages": [{"role": "user", "content": message}]},
+                input={"messages": [await self._build_run_message(message, context)]},
                 if_not_exists="create",
                 multitask_strategy=self.multitask_strategy,
                 metadata=metadata,

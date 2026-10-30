@@ -156,6 +156,15 @@ class TransformerChain:
         return len(self._transformers) > 0
 
 
+async def call_hook(func: Callable, value: Any, context: MessageContext) -> Any:
+    """Call a developer hook that takes (value) or (value, context), sync or async."""
+    if len(inspect.signature(func).parameters) >= 2:
+        result = func(value, context)
+    else:
+        result = func(value)
+    return await result if inspect.isawaitable(result) else result
+
+
 class DictTransformerChain:
     """Manages a chain of dict-to-dict transformers.
 

@@ -35,6 +35,7 @@ class BaseHandler:
         show_tool_calls: bool = False,
         show_tool_call_details: bool = True,
         state: Optional[BridgeState] = None,
+        input_builder=None,
     ):
         """Initialize base handler.
 
@@ -50,6 +51,8 @@ class BaseHandler:
             show_tool_call_details: Show truncated input/output preview + View Details button (default: True)
             state: Bridge state where tool-call details are saved for the "View Full Details"
                 modal (default: a private in-memory store)
+            input_builder: Async function (request, MessageContext) -> the run's input message
+                (default: the request as a plain user message)
         """
         self.assistant_id = assistant_id
         self.input_transformers = input_transformers
@@ -61,6 +64,7 @@ class BaseHandler:
         self.show_tool_calls = show_tool_calls
         self.show_tool_call_details = show_tool_call_details
         self.state = state if state is not None else BridgeState(InMemoryStateStore())
+        self.input_builder = input_builder
 
     async def _apply_input_transforms(
         self,
@@ -80,6 +84,16 @@ class BaseHandler:
         logger.debug(f"After input transforms: {transformed[:100]}...")
         return transformed
 
+    async def _build_run_message(self, request: str, context: MessageContext) -> dict:
+        """The single human message the run receives (framed by SlackBot when wired)."""
+        if self.input_builder:
+            return await self.input_builder(request, context)
+        return {"role": "user", "content": request}
+
+    def conversation_thread_id(self, context: MessageContext) -> str:
+        """The LangGraph thread ID of the conversation a trigger belongs to."""
+        return self._create_thread_id(context.channel_id, self._determine_thread_timestamp(context))
+
     def _determine_thread_timestamp(self, context: MessageContext) -> str:
         """Determine thread timestamp for LangGraph thread ID.
 
@@ -91,7 +105,7 @@ class BaseHandler:
         Returns:
             Thread timestamp string
         """
-        return context.thread_ts or context.message_ts
+        return context.conversation_ts
 
     def _create_thread_id(self, channel_id: str, timestamp: str) -> str:
         """Create LangGraph thread ID from Slack identifiers.
