@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 DAY = 24 * 60 * 60
 
 
+def _now() -> float:
+    """The clock bridge state uses for expiry and probe scheduling (seconds)."""
+    return time.monotonic()
+
+
 class StateStore(Protocol):
     """Namespaced key-value storage with per-item expiry.
 
@@ -52,23 +57,29 @@ class InMemoryStateStore:
     State is lost on restart and isn't shared between replicas.
     """
 
-    def __init__(self, max_items: int = 10_000, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, max_items: int = 10_000, clock: Optional[Callable[[], float]] = None):
         self._items: OrderedDict[tuple[str, str], tuple[dict, Optional[float]]] = OrderedDict()
         self._max_items = max_items
         self._clock = clock
+
+    def _time(self) -> float:
+        return self._clock() if self._clock else _now()
+
+    def _expired(self, expires_at: Optional[float]) -> bool:
+        return expires_at is not None and self._time() >= expires_at
 
     async def get(self, namespace: str, key: str) -> Optional[dict]:
         entry = self._items.get((namespace, key))
         if entry is None:
             return None
         value, expires_at = entry
-        if expires_at is not None and self._clock() >= expires_at:
+        if self._expired(expires_at):
             del self._items[(namespace, key)]
             return None
         return value
 
     async def put(self, namespace: str, key: str, value: dict, ttl: Optional[float] = None) -> None:
-        expires_at = self._clock() + ttl if ttl is not None else None
+        expires_at = self._time() + ttl if ttl is not None else None
         self._items[(namespace, key)] = (value, expires_at)
         self._items.move_to_end((namespace, key))
         while len(self._items) > self._max_items:
@@ -76,6 +87,18 @@ class InMemoryStateStore:
 
     async def delete(self, namespace: str, key: str) -> None:
         self._items.pop((namespace, key), None)
+
+    def live_items(self) -> list[tuple[str, str, dict, Optional[float]]]:
+        """Unexpired items as ``(namespace, key, value, remaining_ttl)``, oldest first.
+
+        ``remaining_ttl`` is in seconds, or None for items that don't expire.
+        """
+        now = self._time()
+        return [
+            (namespace, key, value, expires_at - now if expires_at is not None else None)
+            for (namespace, key), (value, expires_at) in self._items.items()
+            if not self._expired(expires_at)
+        ]
 
 
 class LangGraphStateStore:
@@ -117,78 +140,172 @@ class LangGraphStateStore:
         await self._store.delete_item(self._namespace(namespace), key=key)
 
 
-class DeploymentStateStore:
-    """Uses the deployment's LangGraph store when reachable, otherwise the in-memory store.
+def _ttl_unsupported(error: Exception) -> Optional[bool]:
+    """Classify a failed TTL write: True if it proves the store doesn't support TTLs,
+    None if it might (an opaque server error), False if it's an operational failure.
 
-    Reachability is probed on first use. After a failed probe the in-memory store is used,
-    and the probe is retried every ``retry_after`` seconds so a transient failure doesn't
-    keep the bridge off the shared store for good.
+    In loopback mode (the bridge running inside the Agent Server) the store's own
+    ``NotImplementedError("TTL is not supported by ...")`` reaches the client. Over HTTP the
+    server turns it into a bare 500, indistinguishable from any other server error.
+    """
+    if isinstance(error, NotImplementedError) and "TTL" in str(error):
+        return True
+    if getattr(error, "status_code", None) == 500:
+        return None
+    return False
+
+
+class DeploymentStateStore:
+    """Uses the deployment's LangGraph store, failing over to a bounded in-memory store.
+
+    - The store is probed on first use. If it's unreachable, or any later read or write
+      fails for operational reasons, records go to the in-memory fallback and the store is
+      re-probed every ``retry_after`` seconds. A missing key is not a failure.
+    - On recovery, unexpired fallback records are copied to the store with their remaining
+      TTL, so records created during the outage stay usable. A record the store already
+      holds is kept, never overwritten.
+    - TTL support is decided once, from an error that proves it's missing; transient probe
+      failures never disable expiry.
+
+    Records written only to the store before an outage aren't readable until it recovers.
     """
 
     PROBE_NAMESPACE = "probe"
     PROBE_KEY = "reachable"
+    PROBE_TTL = 60
 
     def __init__(
         self,
         langgraph_client,
         scope: str = "default",
         retry_after: float = 300,
-        clock: Callable[[], float] = time.monotonic,
+        max_fallback_items: int = 10_000,
+        clock: Optional[Callable[[], float]] = None,
     ):
         self._client = langgraph_client
         self._scope = scope
         self._retry_after = retry_after
         self._clock = clock
-        self._store: Optional[StateStore] = None
-        self._fallback: Optional[InMemoryStateStore] = None
+        self._fallback = InMemoryStateStore(max_fallback_items, clock=clock)
+        self._durable: Optional[LangGraphStateStore] = None
+        self._healthy = False
         self._next_probe_at = 0.0
         self._lock = asyncio.Lock()
 
-    async def _probe(self, supports_ttl: bool) -> LangGraphStateStore:
-        store = LangGraphStateStore(self._client, self._scope, supports_ttl=supports_ttl)
-        await store.put(self.PROBE_NAMESPACE, self.PROBE_KEY, {}, ttl=60)
-        return store
+    def _time(self) -> float:
+        return self._clock() if self._clock else _now()
 
-    async def _resolve(self) -> StateStore:
-        if self._store is not None:
-            return self._store
-        if self._fallback is not None and self._clock() < self._next_probe_at:
-            return self._fallback
-        async with self._lock:
-            if self._store is not None:
-                return self._store
-            try:
-                self._store = await self._probe(supports_ttl=True)
-                logger.info("Bridge state: using the LangGraph store")
-                return self._store
-            except Exception as ttl_error:
+    # -- health ------------------------------------------------------------
+
+    async def _probe(self) -> LangGraphStateStore:
+        """Write a probe item, deciding TTL support on the first successful probe."""
+        if self._durable is not None:
+            await self._durable.put(self.PROBE_NAMESPACE, self.PROBE_KEY, {}, ttl=self.PROBE_TTL)
+            return self._durable
+
+        with_ttl = LangGraphStateStore(self._client, self._scope, supports_ttl=True)
+        try:
+            await with_ttl.put(self.PROBE_NAMESPACE, self.PROBE_KEY, {}, ttl=self.PROBE_TTL)
+            return with_ttl
+        except Exception as ttl_error:
+            verdict = _ttl_unsupported(ttl_error)
+            if verdict is False:
+                raise
+            without_ttl = LangGraphStateStore(self._client, self._scope, supports_ttl=False)
+            await without_ttl.put(self.PROBE_NAMESPACE, self.PROBE_KEY, {})
+            if verdict is None:
+                # An opaque 500: TTLs are unsupported only if a TTL write fails the same way
+                # again right after a write without one succeeded.
                 try:
-                    self._store = await self._probe(supports_ttl=False)
-                    logger.warning(
-                        f"Bridge state: the LangGraph store rejected a TTL ({ttl_error}). Using "
-                        f"it without expiry; enable store TTLs in your deployment config so "
-                        f"bridge records expire."
-                    )
-                    return self._store
-                except Exception as e:
-                    logger.warning(
-                        f"Bridge state: the LangGraph store is not reachable ({e}). Using a "
-                        f"bounded in-memory store until it is: feedback buttons, tool-call "
-                        f"details, joined threads and duplicate suppression won't survive "
-                        f"restarts or be shared between replicas."
-                    )
-                    self._fallback = self._fallback or InMemoryStateStore()
-                    self._next_probe_at = self._clock() + self._retry_after
-                    return self._fallback
+                    await with_ttl.put(self.PROBE_NAMESPACE, self.PROBE_KEY, {}, ttl=self.PROBE_TTL)
+                    return with_ttl
+                except Exception as retry_error:
+                    if _ttl_unsupported(retry_error) is False:
+                        raise
+            logger.warning(
+                f"Bridge state: the LangGraph store doesn't support TTLs ({ttl_error}). "
+                f"Using it without expiry; enable store TTLs in your deployment config so "
+                f"bridge records expire."
+            )
+            return without_ttl
+
+    def _fail_over(self, error: Exception) -> None:
+        if self._healthy:
+            logger.warning(
+                f"Bridge state: the LangGraph store failed ({error}). Using a bounded in-memory "
+                f"store until it recovers."
+            )
+        self._healthy = False
+        self._next_probe_at = self._time() + self._retry_after
+
+    async def _drain_fallback(self) -> None:
+        """Copy unexpired fallback records to the store, keeping any record it already has."""
+        for namespace, key, value, remaining_ttl in self._fallback.live_items():
+            if await self._durable.get(namespace, key) is None:
+                await self._durable.put(namespace, key, value, remaining_ttl)
+            await self._fallback.delete(namespace, key)
+
+    async def _use_durable(self) -> bool:
+        """True if operations should go to the LangGraph store right now."""
+        if self._healthy:
+            return True
+        if self._time() < self._next_probe_at:
+            return False
+        async with self._lock:
+            if self._healthy:
+                return True
+            if self._time() < self._next_probe_at:
+                return False
+            first_probe = self._durable is None and self._next_probe_at == 0.0
+            try:
+                self._durable = await self._probe()
+                await self._drain_fallback()
+            except Exception as e:
+                logger.warning(
+                    f"Bridge state: the LangGraph store is not reachable ({e}). Using a bounded "
+                    f"in-memory store until it is: records kept meanwhile won't survive a "
+                    f"restart or be shared between replicas."
+                )
+                self._fail_over(e)
+                return False
+            self._healthy = True
+            logger.info(
+                "Bridge state: using the LangGraph store"
+                if first_probe
+                else "Bridge state: the LangGraph store recovered"
+            )
+            return True
+
+    # -- StateStore --------------------------------------------------------
 
     async def get(self, namespace: str, key: str) -> Optional[dict]:
-        return await (await self._resolve()).get(namespace, key)
+        if await self._use_durable():
+            try:
+                value = await self._durable.get(namespace, key)
+            except Exception as e:
+                self._fail_over(e)
+            else:
+                if value is not None:
+                    return value
+        # Also covers records written to the fallback while a recovery was in progress
+        return await self._fallback.get(namespace, key)
 
     async def put(self, namespace: str, key: str, value: dict, ttl: Optional[float] = None) -> None:
-        await (await self._resolve()).put(namespace, key, value, ttl)
+        if await self._use_durable():
+            try:
+                await self._durable.put(namespace, key, value, ttl)
+                return
+            except Exception as e:
+                self._fail_over(e)
+        await self._fallback.put(namespace, key, value, ttl)
 
     async def delete(self, namespace: str, key: str) -> None:
-        await (await self._resolve()).delete(namespace, key)
+        await self._fallback.delete(namespace, key)
+        if await self._use_durable():
+            try:
+                await self._durable.delete(namespace, key)
+            except Exception as e:
+                self._fail_over(e)
 
 
 class BridgeState:

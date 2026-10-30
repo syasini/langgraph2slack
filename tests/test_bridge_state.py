@@ -6,13 +6,14 @@ Restarts are simulated by building a second SlackBot against the same fake deplo
 
 import logging
 
+import httpx
 import pytest
 
 from langgraph2slack import InMemoryStateStore
 from langgraph2slack.state import DeploymentStateStore
 from langgraph2slack.utils import TOOL_CALL_DETAILS_ACTION_ID
 
-from .harness import AGENT_USER_ID
+from .harness import AGENT_USER_ID, server_error
 
 MENTION = f"<@{AGENT_USER_ID}>"
 
@@ -319,8 +320,12 @@ async def test_bridge_records_are_never_indexed(make_bridge, deployment):
     assert all(item["index"] is False for item in deployment.store.items.values())
 
 
-async def test_store_without_ttl_support_is_used_without_expiry(make_bridge, deployment, caplog):
+@pytest.mark.parametrize("ttl_error", ["loopback", "http"])
+async def test_store_without_ttl_support_is_used_without_expiry(
+    make_bridge, deployment, caplog, ttl_error
+):
     deployment.store.supports_ttl = False
+    deployment.store.ttl_error = ttl_error
     first = make_bridge(show_feedback_buttons=True)
 
     with caplog.at_level(logging.WARNING):
@@ -329,7 +334,8 @@ async def test_store_without_ttl_support_is_used_without_expiry(make_bridge, dep
     restarted = make_bridge(show_feedback_buttons=True)
     await restarted.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
     assert restarted.feedback_submitted[0]["run_id"] == first.runs[0].run_id
-    assert any("TTL" in r.getMessage() for r in caplog.records)
+    assert any("doesn't support TTLs" in r.getMessage() for r in caplog.records)
+    assert all(item["ttl"] is None for item in deployment.store.items.values())
 
 
 async def test_unreachable_store_is_probed_again_later(deployment):
@@ -345,4 +351,126 @@ async def test_unreachable_store_is_probed_again_later(deployment):
 
     now[0] = 301
     await store.put("ns", "k3", {"in": "store"})
-    assert list(deployment.store.namespace("ns")) == ["k3"]
+    # Records kept in memory during the outage were moved to the store on recovery
+    assert deployment.store.namespace("ns")["k"]["value"] == {"in": "memory"}
+    assert set(deployment.store.namespace("ns")) == {"k", "k2", "k3"}
+
+
+# ============================================================================
+# Store outages: failover, recovery and TTL detection
+# ============================================================================
+
+PROBE_INTERVAL_MINUTES = 6  # past the 5-minute re-probe interval
+
+
+async def test_records_from_a_startup_outage_survive_recovery(make_bridge, deployment):
+    deployment.store.reachable = False
+    bridge = make_bridge(show_feedback_buttons=True)
+    event = bridge.message("D0DM", "hello", channel_type="im", ts="1600000000.000001")
+    await bridge.send_event(event, event_id="Ev1")
+    reply_ts = bridge.agent_messages("D0DM")[-1]["ts"]
+
+    deployment.store.reachable = True
+    deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
+    await bridge.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
+    await bridge.send_event(event, event_id="Ev1")
+
+    assert bridge.feedback_submitted[0]["run_id"] == bridge.runs[0].run_id
+    assert len(bridge.runs) == 1
+    # ...and they now live in the store, with their remaining expiry
+    feedback = deployment.store.namespace("feedback")
+    assert f"D0DM:{reply_ts}" in feedback
+    assert 0 < feedback[f"D0DM:{reply_ts}"]["ttl"] <= 30 * 24 * 60
+    assert "Ev1" in deployment.store.namespace("duplicate_records")
+
+
+async def test_recovery_keeps_records_the_store_already_has(deployment):
+    store = DeploymentStateStore(deployment, clock=lambda: deployment.store.now_seconds)
+    await store.put("ns", "k", {"from": "before"}, ttl=3600)
+    deployment.store.reachable = False
+    await store.put("ns", "k", {"from": "outage"}, ttl=3600)
+    await store.put("ns", "new", {"from": "outage"}, ttl=3600)
+
+    deployment.store.reachable = True
+    deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
+    assert await store.get("ns", "new") == {"from": "outage"}
+
+    assert deployment.store.namespace("ns")["k"]["value"] == {"from": "before"}
+    assert deployment.store.namespace("ns")["new"]["value"] == {"from": "outage"}
+
+
+async def test_fallback_records_keep_their_remaining_expiry(deployment):
+    store = DeploymentStateStore(deployment, clock=lambda: deployment.store.now_seconds)
+    deployment.store.reachable = False
+    await store.put("ns", "short", {}, ttl=10 * 60)
+    await store.put("ns", "gone", {}, ttl=60)
+
+    deployment.store.reachable = True
+    deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
+    await store.get("ns", "short")
+
+    assert "gone" not in deployment.store.namespace("ns")
+    assert deployment.store.namespace("ns")["short"]["ttl"] == 4  # 10 - 6 minutes left
+
+
+async def test_store_failure_after_startup_fails_over_and_recovers(make_bridge, deployment):
+    bridge = make_bridge(show_feedback_buttons=True)
+    await bridge.send_event(bridge.message("D0DM", "warm-up", channel_type="im"))
+
+    deployment.store.reachable = False
+    event = bridge.message("D0DM", "hello", channel_type="im", ts="1600000000.000002")
+    await bridge.send_event(event, event_id="Ev2")
+    await bridge.send_event(event, event_id="Ev2")
+    reply_ts = bridge.agent_messages("D0DM")[-1]["ts"]
+    await bridge.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
+
+    assert [r.text for r in bridge.runs] == ["warm-up", "hello"]
+    assert bridge.feedback_submitted[-1]["run_id"] == bridge.runs[-1].run_id
+
+    deployment.store.reachable = True
+    deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
+    await bridge.click("feedback", "negative", channel="D0DM", message_ts=reply_ts)
+    await bridge.send_event(event, event_id="Ev2")
+
+    assert bridge.feedback_submitted[-1]["run_id"] == bridge.runs[-1].run_id
+    assert len(bridge.runs) == 2
+    assert f"D0DM:{reply_ts}" in deployment.store.namespace("feedback")
+    assert "Ev2" in deployment.store.namespace("duplicate_records")
+
+
+async def test_missing_keys_do_not_trigger_failover(make_bridge, deployment):
+    bridge = make_bridge(show_feedback_buttons=True)
+    await bridge.click("feedback", "positive", channel="D0DM", message_ts="1.000001")
+
+    await bridge.send_event(bridge.message("D0DM", "hello", channel_type="im"), event_id="Ev3")
+
+    assert "Ev3" in deployment.store.namespace("duplicate_records")
+
+
+async def test_a_failing_store_never_aborts_a_run(make_bridge, deployment):
+    bridge = make_bridge()
+    await bridge.send_event(bridge.message("D0DM", "warm-up", channel_type="im"))
+    deployment.store.fail_next(httpx.ReadTimeout("slow store"), times=50)
+
+    await bridge.send_event(bridge.message("D0DM", "hello", channel_type="im"))
+
+    assert [r.text for r in bridge.runs] == ["warm-up", "hello"]
+    assert bridge.agent_messages("D0DM")
+
+
+@pytest.mark.parametrize(
+    "transient",
+    [httpx.ConnectError("blip"), server_error()],
+    ids=["connection-error", "one-off-500"],
+)
+async def test_transient_probe_failure_keeps_ttls(make_bridge, deployment, transient):
+    deployment.store.fail_next(transient)
+    bridge = make_bridge(show_feedback_buttons=True)
+
+    await bridge.send_event(bridge.message("D0DM", "hello", channel_type="im"))
+    deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
+    await bridge.send_event(bridge.message("D0DM", "again", channel_type="im"))
+
+    items = deployment.store.items.values()
+    assert items
+    assert all(item["ttl"] is not None for item in items)
