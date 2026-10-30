@@ -27,6 +27,7 @@ oauth_config:
       - app_mentions:read      # View when bot is @mentioned
       - channels:history       # View messages in public channels
       - channels:read          # View public channel info
+      - files:read             # Read files shared with the bot (images, logs, code)
       - groups:history         # View messages in private channels
       - groups:read            # View private channel info
       - im:history             # View direct messages

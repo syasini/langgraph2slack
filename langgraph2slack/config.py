@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .triggers import Provenance, Trigger
 
 if TYPE_CHECKING:
+    from .files import FilePart
     from .framing import RequestedBy
     from .normalizer import NormalizedMessage
 
@@ -103,6 +104,8 @@ class MessageContext:
         # Slack messages handed over as backfill (oldest first)
         self.requested_by: Optional["RequestedBy"] = None
         self.backfill: tuple["NormalizedMessage", ...] = ()
+        # Files attached to the trigger, as the agent receives them
+        self.files: tuple["FilePart", ...] = ()
 
         # Extract basic info from event (no API calls needed)
         self._user_id = event.get("user", "")
