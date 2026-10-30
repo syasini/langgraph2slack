@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- `SlackBot.message_run_mapping` and `SlackBot.tool_call_store` (in-process dicts) are replaced by `SlackBot.state`; handlers take `state=` instead of `tool_call_store=`.
 - Refreshed `uv.lock` to the latest releases (`langgraph-sdk` 0.4.10, `langsmith` 0.14.14, `slack-bolt` 1.30.0, `slack-sdk` 3.45.0); the full test suite passes unchanged. Declared minimum versions are unchanged.
 - `examples/plant_bot` now targets the latest LangGraph stack (`langgraph` 1.2.18, `langgraph-api` 0.16.9, `langchain` 1.4.7) and requires Python ≥ 3.11 (required by `langgraph-api`).
 
@@ -18,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Default metadata gains `slack_trigger_kind`, `slack_author_type`, `slack_author_id`, `slack_bot_id`, `slack_app_id` and `slack_requester_id`.
   - The run config always carries a `slack` entry under `configurable` with the same provenance plus channel and thread identifiers, filled in before config transformers run.
   - `MessageContext` gains `trigger_kind`, `author_type`, `author_id`, `bot_id`, `app_id` and `requester_id`.
+- **Durable bridge state** (`state_store` SlackBot parameter, `StateStore` / `InMemoryStateStore` / `LangGraphStateStore` exports). Feedback mappings, tool-call details, joined threads and duplicate records now live in the deployment's LangGraph store by default, so feedback buttons and "View Full Details" keep working after a restart or redeploy. Each kind of record expires on its own TTL. If the store is unreachable at startup or fails later, the bridge logs a warning, keeps new records in a bounded in-memory store and re-probes every 5 minutes; on recovery those records move to the store with their remaining TTL (records the store already holds are kept). A store without TTL support is detected from the error it returns and used without expiry, with a warning. Pass your own `StateStore` to use other storage.
+- **Duplicate suppression:** a redelivered Slack event (same event ID, or same message and trigger kind) starts no second run, including on another replica or after a restart (best-effort).
+- **Joined threads are remembered:** after the agent posts in a thread, replies there are recognized from bridge state instead of reading Slack's thread history on every message.
 - Test harness with a fake Slack workspace and a fake LangGraph deployment: tests deliver raw, signed Slack payloads through Bolt and assert on the runs started and the Slack calls made.
 
 ### Fixed

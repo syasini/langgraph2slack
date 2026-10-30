@@ -5,7 +5,7 @@ Bolt exactly as the HTTP endpoint would, against two fakes:
 
 - ``FakeSlackWorkspace`` answers every Web API call the bridge makes (all calls go through
   ``AsyncWebClient.api_call``, which the harness routes to the fake) and records them.
-- ``FakeLangGraphDeployment`` records run requests and implements the thread API.
+- ``FakeLangGraphDeployment`` records run requests and implements the thread and store APIs.
 
 Payloads are signed with the test signing secret, so Bolt's request verification runs as it
 does in production.
@@ -22,10 +22,12 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-from unittest.mock import patch
+from typing import Any, Callable, Optional, Union
+from unittest.mock import MagicMock, patch
 from urllib.parse import urlencode
 
+import httpx
+from langgraph_sdk.errors import InternalServerError, NotFoundError
 from slack_bolt.request.async_request import AsyncBoltRequest
 from slack_sdk.signature import SignatureVerifier
 from slack_sdk.web.async_client import AsyncWebClient
@@ -226,9 +228,8 @@ class _FakeRuns:
     ):
         request = self._record(thread_id, assistant_id, input, metadata, config, multitask_strategy)
         yield Chunk("metadata", {"run_id": request.run_id})
-        reply = self._d.reply_for(request)
-        if reply:
-            yield Chunk("messages", ({"type": "AIMessageChunk", "content": reply}, {}))
+        for message in self._d.reply_messages(request):
+            yield Chunk("messages", (message, {}))
 
     async def create(
         self,
@@ -247,12 +248,15 @@ class _FakeRuns:
 
     async def join(self, thread_id, run_id, **kwargs):
         request = next(r for r in self._d.runs_started if r.run_id == run_id)
-        return {
-            "messages": [
-                *request.input["messages"],
-                {"type": "ai", "content": self._d.reply_for(request)},
+        reply = self._d.reply_for(request)
+        if isinstance(reply, str):
+            produced = [{"type": "ai", "content": reply}]
+        else:
+            # Streamed chunks become complete messages in the final state
+            produced = [
+                {**m, "type": "ai"} if m.get("type") == "AIMessageChunk" else m for m in reply
             ]
-        }
+        return {"messages": [*request.input["messages"], *produced]}
 
 
 class _FakeThreads:
@@ -274,18 +278,117 @@ class _FakeThreads:
         return {}
 
 
+def server_error(message: str = "Internal Server Error") -> InternalServerError:
+    """What the SDK raises for an unhandled server error over HTTP: a bare 500."""
+    request = httpx.Request("PUT", "http://fake/store/items")
+    return InternalServerError(message, response=httpx.Response(500, request=request), body=message)
+
+
+class _FakeStore:
+    """The LangGraph store: namespaced items with TTLs in minutes, on a controllable clock.
+
+    The clock is the deployment's clock: the bridge's own expiry and probe scheduling follow
+    it too (see the ``make_bridge`` fixture), so ``advance()`` moves time for both.
+
+    - ``reachable = False``: every call fails with a connection error.
+    - ``fail_next(error, times)``: the next calls fail with ``error``, then calls succeed.
+    - ``supports_ttl = False``: writes with a TTL fail the way the server reports it, per
+      ``ttl_error``: "loopback" (the store's NotImplementedError reaches the client) or
+      "http" (a bare 500).
+    """
+
+    def __init__(self) -> None:
+        self.items: dict[tuple[tuple[str, ...], str], dict] = {}
+        self.now_minutes = 0.0
+        self.reachable = True
+        self.supports_ttl = True
+        self.ttl_error = "loopback"
+        self._failures: list[Exception] = []
+
+    @property
+    def now_seconds(self) -> float:
+        return self.now_minutes * 60
+
+    def fail_next(self, error: Exception, times: int = 1) -> None:
+        self._failures.extend([error] * times)
+
+    def _check_reachable(self) -> None:
+        if self._failures:
+            raise self._failures.pop(0)
+        if not self.reachable:
+            raise httpx.ConnectError("store not reachable")
+
+    def advance(self, *, minutes: float = 0, days: float = 0) -> None:
+        self.now_minutes += minutes + days * 24 * 60
+
+    def namespace(self, name: str) -> dict[str, dict]:
+        """Live items in one bridge namespace, by key."""
+        return {
+            key: item
+            for (ns, key), item in self.items.items()
+            if ns[-1] == name and not self._expired(item)
+        }
+
+    def _expired(self, item: dict) -> bool:
+        return item["expires_at"] is not None and self.now_minutes >= item["expires_at"]
+
+    async def put_item(self, namespace, /, key, value, index=None, ttl=None, **kwargs):
+        self._check_reachable()
+        if ttl is not None and not self.supports_ttl:
+            if self.ttl_error == "loopback":
+                raise NotImplementedError(
+                    "TTL is not supported by InMemoryStore. Use a store implementation that "
+                    "supports TTL or set ttl=None."
+                )
+            raise server_error()
+        self.items[(tuple(namespace), key)] = {
+            "value": dict(value),
+            "index": index,
+            "ttl": ttl,
+            "expires_at": self.now_minutes + ttl if ttl is not None else None,
+        }
+
+    async def get_item(self, namespace, /, key, *, refresh_ttl=None, **kwargs):
+        self._check_reachable()
+        item = self.items.get((tuple(namespace), key))
+        if item is None or self._expired(item):
+            request = httpx.Request("GET", "http://fake/store/items")
+            raise NotFoundError(
+                "not found", response=httpx.Response(404, request=request), body=None
+            )
+        return {"namespace": list(namespace), "key": key, "value": item["value"]}
+
+    async def delete_item(self, namespace, /, key, **kwargs):
+        self._check_reachable()
+        self.items.pop((tuple(namespace), key), None)
+
+
+Reply = Union[str, list[dict]]
+
+
 class FakeLangGraphDeployment:
-    """Records run requests and implements the thread API the bridge uses."""
+    """Records run requests and implements the thread and store APIs the bridge uses.
+
+    ``reply`` is what each run streams back: a string (one AI message chunk), a list of
+    message dicts (streamed in order, for tool calls), or a callable taking the RunRequest.
+    """
 
     def __init__(self) -> None:
         self.runs_started: list[RunRequest] = []
         self.threads_by_id: dict[str, dict] = {}
-        self.reply: str | Callable[[RunRequest], str] = "Hello from the agent"
+        self.reply: Union[Reply, Callable[[RunRequest], Reply]] = "Hello from the agent"
         self.runs = _FakeRuns(self)
         self.threads = _FakeThreads(self)
+        self.store = _FakeStore()
 
-    def reply_for(self, request: RunRequest) -> str:
+    def reply_for(self, request: RunRequest) -> Reply:
         return self.reply(request) if callable(self.reply) else self.reply
+
+    def reply_messages(self, request: RunRequest) -> list[dict]:
+        reply = self.reply_for(request)
+        if isinstance(reply, str):
+            return [{"type": "AIMessageChunk", "content": reply}] if reply else []
+        return reply
 
 
 # ============================================================================
@@ -300,7 +403,6 @@ class BridgeHarness:
         self.bot = bot
         self.slack = slack
         self.deployment = deployment
-        self._event_ids = itertools.count(1)
 
     @property
     def runs(self) -> list[RunRequest]:
@@ -318,10 +420,14 @@ class BridgeHarness:
             "api_app_id": AGENT_APP_ID,
             "event": event,
             "type": "event_callback",
-            "event_id": event_id or f"Ev{next(self._event_ids):08d}",
             "event_time": int(time.time()),
             "authorizations": [{"team_id": TEAM_ID, "user_id": AGENT_USER_ID, "is_bot": True}],
         }
+        # A fresh event ID per delivery unless given; "" sends none (exercises the fallback key)
+        if event_id is None:
+            event_id = f"Ev{uuid.uuid4().hex[:12]}"
+        if event_id:
+            envelope["event_id"] = event_id
         return await self._dispatch(json.dumps(envelope), "application/json")
 
     async def send_interaction(self, payload: dict) -> int:
@@ -349,6 +455,38 @@ class BridgeHarness:
     def message(self, channel: str, text: str, **fields) -> dict:
         """Build a human message event (not yet delivered)."""
         return {"type": "message", "channel": channel, "user": "U0HUMAN", "text": text, **fields}
+
+    async def click(
+        self, action_id: str, value: str, *, channel: str, message_ts: str, user: str = "U0HUMAN"
+    ) -> int:
+        """Click a button on a Slack message."""
+        return await self.send_interaction(
+            {
+                "type": "block_actions",
+                "team": {"id": TEAM_ID},
+                "api_app_id": AGENT_APP_ID,
+                "user": {"id": user, "team_id": TEAM_ID},
+                "trigger_id": "trigger-1",
+                "container": {
+                    "type": "message",
+                    "channel_id": channel,
+                    "message_ts": message_ts,
+                },
+                "channel": {"id": channel},
+                "actions": [
+                    {"action_id": action_id, "value": value, "type": "button", "block_id": "b"}
+                ],
+            }
+        )
+
+    @property
+    def feedback_submitted(self) -> list[dict]:
+        """Feedback the bridge sent to LangSmith (the client is faked)."""
+        return [c.kwargs for c in self.bot.langsmith_client.create_feedback.call_args_list]
+
+    def agent_messages(self, channel: str) -> list[dict]:
+        """Messages the agent has posted in a channel."""
+        return [m for m in self.slack.messages.get(channel, []) if m.get("user") == AGENT_USER_ID]
 
 
 async def drain(timeout: float = 5.0) -> None:
@@ -408,6 +546,9 @@ def build_bridge(
     slackbot_kwargs.setdefault("assistant_id", ASSISTANT_ID)
     slackbot_kwargs.setdefault("slack_bot_token", BOT_TOKEN)
     slackbot_kwargs.setdefault("slack_signing_secret", SIGNING_SECRET)
-    with patch("langgraph2slack.bot.get_client", return_value=deployment):
+    with (
+        patch("langgraph2slack.bot.get_client", return_value=deployment),
+        patch("langgraph2slack.bot.Client", MagicMock),
+    ):
         bot = SlackBot(**slackbot_kwargs)
     return BridgeHarness(bot, slack, deployment)

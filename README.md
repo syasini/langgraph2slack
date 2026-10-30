@@ -409,6 +409,36 @@ bot = SlackBot(
 )
 ```
 
+### Bridge State
+
+The bridge remembers a few things between Slack events: which run produced each reply
+(for feedback buttons), tool-call details (for "View Full Details"), which threads the
+agent has joined, and which events it has already handled (so Slack's retries never start
+a second run). Each kind of record expires on its own schedule.
+
+By default this lives in the deployment's **LangGraph store**, so it survives restarts and
+redeploys and is shared between replicas; no extra infrastructure is needed on the Agent
+Server. If the store is unreachable at startup, or fails later, the bridge logs a warning
+and keeps new records in a bounded in-memory store, re-checking the store every few
+minutes. When it recovers, those records are copied to it with their remaining expiry, so
+feedback buttons and duplicate suppression keep working across the outage.
+
+To use your own storage, pass any object with these three async methods:
+
+```python
+from langgraph2slack import SlackBot, StateStore
+
+class RedisStateStore:  # implements StateStore
+    async def get(self, namespace: str, key: str) -> dict | None: ...
+    async def put(self, namespace: str, key: str, value: dict, ttl: float | None = None) -> None: ...
+    async def delete(self, namespace: str, key: str) -> None: ...
+
+bot = SlackBot(state_store=RedisStateStore())
+```
+
+`ttl` is in seconds; `get` returns `None` for a missing or expired item. Duplicate suppression
+across replicas is best-effort, since the store has no compare-and-set.
+
 ## How It Works
 
 ### Architecture
