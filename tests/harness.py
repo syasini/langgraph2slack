@@ -279,16 +279,43 @@ class _FakeThreads:
         return {}
 
 
+def server_error(message: str = "Internal Server Error") -> InternalServerError:
+    """What the SDK raises for an unhandled server error over HTTP: a bare 500."""
+    request = httpx.Request("PUT", "http://fake/store/items")
+    return InternalServerError(message, response=httpx.Response(500, request=request), body=message)
+
+
 class _FakeStore:
-    """The LangGraph store: namespaced items with TTLs in minutes, on a controllable clock."""
+    """The LangGraph store: namespaced items with TTLs in minutes, on a controllable clock.
+
+    The clock is the deployment's clock: the bridge's own expiry and probe scheduling follow
+    it too (see the ``make_bridge`` fixture), so ``advance()`` moves time for both.
+
+    - ``reachable = False``: every call fails with a connection error.
+    - ``fail_next(error, times)``: the next calls fail with ``error``, then calls succeed.
+    - ``supports_ttl = False``: writes with a TTL fail the way the server reports it, per
+      ``ttl_error``: "loopback" (the store's NotImplementedError reaches the client) or
+      "http" (a bare 500).
+    """
 
     def __init__(self) -> None:
         self.items: dict[tuple[tuple[str, ...], str], dict] = {}
         self.now_minutes = 0.0
         self.reachable = True
         self.supports_ttl = True
+        self.ttl_error = "loopback"
+        self._failures: list[Exception] = []
+
+    @property
+    def now_seconds(self) -> float:
+        return self.now_minutes * 60
+
+    def fail_next(self, error: Exception, times: int = 1) -> None:
+        self._failures.extend([error] * times)
 
     def _check_reachable(self) -> None:
+        if self._failures:
+            raise self._failures.pop(0)
         if not self.reachable:
             raise httpx.ConnectError("store not reachable")
 
@@ -309,10 +336,12 @@ class _FakeStore:
     async def put_item(self, namespace, /, key, value, index=None, ttl=None, **kwargs):
         self._check_reachable()
         if ttl is not None and not self.supports_ttl:
-            request = httpx.Request("PUT", "http://fake/store/items")
-            raise InternalServerError(
-                "TTL is not supported", response=httpx.Response(500, request=request), body=None
-            )
+            if self.ttl_error == "loopback":
+                raise NotImplementedError(
+                    "TTL is not supported by InMemoryStore. Use a store implementation that "
+                    "supports TTL or set ttl=None."
+                )
+            raise server_error()
         self.items[(tuple(namespace), key)] = {
             "value": dict(value),
             "index": index,
@@ -352,6 +381,10 @@ class FakeLangGraphDeployment:
         self.runs = _FakeRuns(self)
         self.threads = _FakeThreads(self)
         self.store = _FakeStore()
+
+    def thread(self, thread_id: str) -> dict:
+        """The thread with this ID, created if it doesn't exist yet."""
+        return self.threads_by_id.setdefault(thread_id, {"thread_id": thread_id, "values": {}})
 
     def reply_for(self, request: RunRequest) -> Reply:
         return self.reply(request) if callable(self.reply) else self.reply
@@ -435,7 +468,7 @@ class BridgeHarness:
         }
 
     async def click(
-        self, action_id: str, value: str, *, channel: str, message_ts: str, user: str = "U0HUMAN"
+        self, action_id: str, value: str, *, channel: str, message_ts: str, user: str = HUMAN_USER_ID
     ) -> int:
         """Click a button on a Slack message."""
         return await self.send_interaction(

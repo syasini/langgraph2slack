@@ -418,8 +418,10 @@ a second run). Each kind of record expires on its own schedule.
 
 By default this lives in the deployment's **LangGraph store**, so it survives restarts and
 redeploys and is shared between replicas; no extra infrastructure is needed on the Agent
-Server. When no store is reachable, the bridge logs a warning and falls back to a bounded
-in-memory store.
+Server. If the store is unreachable at startup, or fails later, the bridge logs a warning
+and keeps new records in a bounded in-memory store, re-checking the store every few
+minutes. When it recovers, those records are copied to it with their remaining expiry, so
+feedback buttons and duplicate suppression keep working across the outage.
 
 To use your own storage, pass any object with these three async methods:
 

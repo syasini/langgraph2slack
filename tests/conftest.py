@@ -47,6 +47,9 @@ def make_bridge(slack, deployment, monkeypatch):
     monkeypatch.setenv("ASSISTANT_ID", ASSISTANT_ID)
     monkeypatch.delenv("LANGGRAPH_URL", raising=False)
     monkeypatch.delenv("MULTITASK_STRATEGY", raising=False)
+    # One clock for the deployment and the bridge: advancing the fake store's clock also
+    # moves the bridge's fallback expiry and store re-probe schedule.
+    monkeypatch.setattr("langgraph2slack.state._now", lambda: deployment.store.now_seconds)
 
     def factory(**slackbot_kwargs):
         return build_bridge(slack, deployment, **slackbot_kwargs)
