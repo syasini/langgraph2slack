@@ -5,6 +5,7 @@ sets up Slack handlers, and coordinates between Slack and LangGraph.
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 from typing import Callable, Optional
@@ -18,6 +19,7 @@ from slack_bolt.async_app import AsyncApp
 
 from .backfill import BackfillCollector
 from .config import BotConfig, MessageContext
+from .files import FileLimits, FilePart, SlackFileReader, cap_images
 from .framing import RequestedBy, TriggerInput, default_framer
 from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
@@ -142,6 +144,10 @@ class SlackBot:
         backfill: bool = True,
         backfill_max_messages: int = 20,
         backfill_max_chars: int = 8000,
+        inline_images: bool = True,
+        max_image_bytes: int = 2_000_000,
+        max_images: int = 4,
+        max_inline_text_chars: int = 20_000,
     ):
         """Initialize SlackBot.
 
@@ -243,6 +249,15 @@ class SlackBot:
             backfill_max_messages: At most this many backfill messages, the most recent kept
                 (default: 20).
             backfill_max_chars: At most this many characters of backfill text (default: 8000).
+            inline_images: Pass images attached in Slack to the agent as images (default:
+                True). Requires the ``files:read`` scope, as do text files.
+            max_image_bytes: Larger images are listed by reference (default: 2 MB, which stays
+                within model providers' per-image limits once base64-encoded).
+            max_images: At most this many images per run, the request's first, then the
+                backfill's most recent; the rest are listed by reference (default: 4).
+                Images stay in the conversation's checkpointed messages.
+            max_inline_text_chars: Text files (logs, code, CSV, ...) up to this many characters
+                are inlined; larger ones are listed by reference (default: 20000).
         """
         logger.info("Initializing SlackBot...")
 
@@ -314,7 +329,19 @@ class SlackBot:
         self._reactions = ReactionMixin(self.slack_app.client)
 
         # Slack messages -> markdown; earlier thread messages -> backfill; the run's input
-        self._normalizer = SlackMessageNormalizer(self.slack_app.client, self.state)
+        self._normalizer = SlackMessageNormalizer(
+            self.slack_app.client,
+            self.state,
+            SlackFileReader(
+                self.config.get_slack_bot_token(),
+                FileLimits(
+                    inline_images=inline_images,
+                    max_image_bytes=max_image_bytes,
+                    max_images=max_images,
+                    max_inline_text_chars=max_inline_text_chars,
+                ),
+            ),
+        )
         self._backfill = BackfillCollector(
             self.slack_app.client,
             self.langgraph_client,
@@ -1057,16 +1084,8 @@ class SlackBot:
             message = trigger.message
             context = MessageContext(event=message, trigger=trigger)
 
-            # The request as markdown (without the agent's own mention), who asked, and
-            # any backfill from the Slack thread
-            normalized = await self._normalizer.normalize(
-                message, strip_mention_of=self._bot_user_id
-            )
-            message_text = normalized.text
-            context.requested_by = await self._requested_by(context, normalized)
-            context.backfill = tuple(await self._collect_backfill(context, trigger))
-
-            # Start user-processing reactions in background (don't block handler)
+            # Start user-processing reactions in background (don't block handler); before
+            # reading files and backfill, so the user sees the trigger was picked up
             user_processing_reactions = self._get_reactions_for("user", "processing")
             if user_processing_reactions:
                 self._create_background_task(
@@ -1074,6 +1093,17 @@ class SlackBot:
                         user_processing_reactions, context.channel_id, context.message_ts
                     )
                 )
+
+            # The request as markdown (without the agent's own mention), who asked, and
+            # any backfill from the Slack thread
+            normalized = await self._normalizer.normalize(
+                message, strip_mention_of=self._bot_user_id
+            )
+            message_text = normalized.text
+            context.requested_by = await self._requested_by(context, normalized)
+            context.files, context.backfill = self._cap_images(
+                normalized.files, await self._collect_backfill(context, trigger)
+            )
 
             success = False
             try:
@@ -1518,6 +1548,21 @@ class SlackBot:
             until_ts=trigger.occurred_ts,
         )
 
+    def _cap_images(
+        self, files: tuple[FilePart, ...], backfill: list[NormalizedMessage]
+    ) -> tuple[tuple[FilePart, ...], tuple[NormalizedMessage, ...]]:
+        """At most ``max_images`` images per run: the request's first, then the backfill's
+        most recent. The rest are listed by reference."""
+        max_images = self._normalizer.file_limits.max_images
+        newest_first = list(reversed(backfill))
+        flat = [*files, *(f for m in newest_first for f in m.files)]
+        capped = iter(cap_images(flat, max_images))
+        files = tuple(next(capped) for _ in files)
+        capped_backfill = [
+            dataclasses.replace(m, files=tuple(next(capped) for _ in m.files)) for m in newest_first
+        ]
+        return files, tuple(reversed(capped_backfill))
+
     async def _build_run_input(self, request: str, context: MessageContext) -> dict:
         """The single human message the run receives (ADR-0009)."""
         requested_by = context.requested_by or RequestedBy(
@@ -1531,6 +1576,7 @@ class SlackBot:
             requested_by=requested_by,
             provenance=context.provenance,
             backfill=context.backfill,
+            files=context.files,
         )
         if not self._input_formatter:
             return default_framer(trigger)

@@ -346,6 +346,34 @@ async def my_format(trigger: TriggerInput, context) -> str:
 A formatter may return the content (`str`) or a full message dict, such as one with a list
 of content blocks.
 
+### Files
+
+Files attached when someone triggers the agent (and files shared earlier in the thread, as
+part of the backfill) reach the agent too:
+
+- **Images** (PNG, JPEG, WebP) arrive as images: the message content becomes a list of
+  content blocks, the text followed by a label and an `image_url` block (data URL) for each
+  image. At most `max_images` per run (default 4); GIFs and images whose content doesn't
+  match their type are listed instead.
+- **Small text-like files** (logs, code, CSV, JSON, ...) are inlined in an untrusted
+  `<slack_files>` section.
+- **Everything else** is listed with its name, type, size and file ID, and so are files the
+  bridge can't read (deleted, external, or the `files:read` scope missing). They never fail
+  the run.
+
+```python
+bot = SlackBot(
+    inline_images=True,            # default
+    max_image_bytes=2_000_000,     # larger images are listed by reference
+    max_images=4,                  # images per run, the request's first
+    max_inline_text_chars=20_000,  # larger text files are listed by reference
+)
+```
+
+This needs the `files:read` bot scope (included in the example manifests). **Existing
+apps:** add it under *OAuth & Permissions* and reinstall. Images become part of the
+conversation's checkpointed messages, so they're sent to the model again on later turns.
+
 ### Metadata Transformers
 
 Customize what Slack context gets passed to LangSmith:

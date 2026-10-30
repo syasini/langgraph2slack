@@ -4,6 +4,9 @@ This module provides reusable fixtures for testing langgraph2slack components.
 Fixtures are automatically discovered by pytest and available to all test files.
 """
 
+from unittest.mock import patch
+
+import httpx
 import pytest
 
 from langgraph2slack import SlackBot
@@ -29,7 +32,13 @@ def slack():
     """A fake Slack workspace; every Slack Web API call is routed to it for the test."""
     workspace = FakeSlackWorkspace()
     patcher = route_slack_api(workspace)
-    yield workspace
+    # Private file downloads go to the workspace too, over a mock HTTP transport
+    transport = httpx.MockTransport(workspace.serve_file)
+    with patch(
+        "langgraph2slack.files._new_client",
+        lambda: httpx.AsyncClient(transport=transport, follow_redirects=True),
+    ):
+        yield workspace
     patcher.stop()
 
 
@@ -76,7 +85,7 @@ def sample_dm_event():
         "channel": "D789DM",
         "channel_type": "im",
         "text": "hello bot",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -94,7 +103,7 @@ def sample_channel_event():
         "channel": "C123CHANNEL",
         "channel_type": "channel",
         "text": "<@U123BOT> hello",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -113,7 +122,7 @@ def sample_thread_event():
         "channel_type": "channel",
         "text": "reply in thread",
         "ts": "1234567.999",
-        "thread_ts": "1234567.890"  # Parent message timestamp
+        "thread_ts": "1234567.890",  # Parent message timestamp
     }
 
 
@@ -131,7 +140,7 @@ def sample_group_event():
         "channel": "G789GROUP",
         "channel_type": "group",
         "text": "hello team",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -266,7 +275,7 @@ def valid_env_vars(monkeypatch):
         "SLACK_BOT_TOKEN": "xoxb-test-token-123",
         "SLACK_SIGNING_SECRET": "test-signing-secret-456",
         "ASSISTANT_ID": "test-assistant",
-        "LANGGRAPH_URL": "http://localhost:8123"
+        "LANGGRAPH_URL": "http://localhost:8123",
     }
 
     # Set all env vars

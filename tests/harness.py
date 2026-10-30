@@ -68,6 +68,10 @@ class FakeSlackWorkspace:
         self.users: dict[str, dict] = {}
         self.channels: dict[str, dict] = {}
         self.failing_methods: dict[str, str] = {}
+        # url -> (content, content type) for private file downloads
+        self.file_contents: dict[str, tuple[bytes, str]] = {}
+        self.scope_required: set[str] = set()
+        self.downloads: list[tuple[str, str]] = []
         self._ts = itertools.count(1)
 
     # -- workspace setup ---------------------------------------------------
@@ -82,6 +86,54 @@ class FakeSlackWorkspace:
         message.setdefault("ts", self.next_ts())
         self.messages.setdefault(channel, []).append(message)
         return message
+
+    def add_file(
+        self,
+        file_id: str,
+        name: str,
+        mimetype: str,
+        content: bytes,
+        *,
+        filetype: str = "",
+        requires_scope: bool = False,
+        **fields,
+    ) -> dict:
+        """A Slack file object (as it appears in a message's ``files``), downloadable.
+
+        ``requires_scope``: the bridge lacks access, so Slack redirects to its sign-in page.
+        """
+        url = f"https://files.slack.com/files-pri/T0TEAM-{file_id}/download/{name}"
+        self.file_contents[url] = (content, mimetype)
+        if requires_scope:
+            self.scope_required.add(url)
+        return {
+            "id": file_id,
+            "name": name,
+            "title": name,
+            "mimetype": mimetype,
+            "filetype": filetype,
+            "size": len(content),
+            "mode": "hosted",
+            "url_private": url,
+            "url_private_download": url,
+            **fields,
+        }
+
+    def serve_file(self, request: httpx.Request) -> httpx.Response:
+        """HTTP for private file downloads (and the sign-in page Slack redirects to)."""
+        if request.url.host == "slack.com":
+            return httpx.Response(
+                200, headers={"content-type": "text/html"}, content=b"<html>Sign in</html>"
+            )
+        url = str(request.url)
+        token = request.headers.get("authorization", "").removeprefix("Bearer ")
+        self.downloads.append((url, token))
+        if url in self.scope_required:
+            return httpx.Response(302, headers={"location": "https://slack.com/signin?redir=1"})
+        if url not in self.file_contents:
+            return httpx.Response(404)
+        content, content_type = self.file_contents[url]
+        return httpx.Response(200, headers={"content-type": content_type}, content=content)
 
     def fail(self, method: str, error: str = "fatal_error") -> None:
         """Make every call to ``method`` fail with a Slack API error."""

@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+from .files import FileLimits, FilePart, SlackFileReader
 from .state import BridgeState
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class NormalizedMessage:
     author_id: Optional[str]  # user ID, or bot ID for classic integrations
     display_name: str
     text: str
-    files: tuple = field(default_factory=tuple)
+    files: tuple[FilePart, ...] = field(default_factory=tuple)
 
     @property
     def is_bot(self) -> bool:
@@ -55,11 +56,18 @@ class NormalizedMessage:
 class SlackMessageNormalizer:
     """Normalizes Slack messages, resolving user and channel names (cached)."""
 
-    def __init__(self, slack_client, state: BridgeState):
+    def __init__(
+        self, slack_client, state: BridgeState, file_reader: Optional[SlackFileReader] = None
+    ):
         self._slack = slack_client
         self._state = state
+        self._files = file_reader
         # IDs whose lookup failed recently -> when to try again (bounded)
         self._failed_lookups: dict[str, float] = {}
+
+    @property
+    def file_limits(self) -> FileLimits:
+        return self._files.limits if self._files else FileLimits()
 
     def _recently_failed(self, key: str) -> bool:
         retry_at = self._failed_lookups.get(key)
@@ -71,7 +79,11 @@ class SlackMessageNormalizer:
         self._failed_lookups[key] = time.monotonic() + FAILED_LOOKUP_TTL
 
     async def normalize(
-        self, message: dict, *, strip_mention_of: Optional[str] = None
+        self,
+        message: dict,
+        *,
+        strip_mention_of: Optional[str] = None,
+        read_files: bool = True,
     ) -> NormalizedMessage:
         """Normalize one Slack message.
 
@@ -79,6 +91,8 @@ class SlackMessageNormalizer:
             message: A Slack message (from an event or read back from the thread)
             strip_mention_of: A user ID whose mentions are removed (the bridge's own, for
                 the request text)
+            read_files: Read the message's files now (otherwise ``files`` is empty; see
+                ``read_files``)
         """
         raw = message_markup(message)
         if strip_mention_of:
@@ -94,7 +108,16 @@ class SlackMessageNormalizer:
             author_id=author_id,
             display_name=await self._author_name(message),
             text=_tidy(text),
+            files=await self.read_files(message) if read_files else (),
         )
+
+    async def read_files(
+        self, message: dict, *, budget_chars: Optional[int] = None
+    ) -> tuple[FilePart, ...]:
+        """The message's files as the agent receives them (``budget_chars``: see the reader)."""
+        if not self._files or not message.get("files"):
+            return ()
+        return await self._files.read(message["files"], budget_chars=budget_chars)
 
     # -- markup conversion -------------------------------------------------
 
