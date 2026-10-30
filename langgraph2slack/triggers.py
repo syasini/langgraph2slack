@@ -19,8 +19,9 @@ TriggerKind = Literal["mention", "direct_message", "joined_thread", "shortcut", 
 AuthorType = Literal["human", "bot"]
 
 # Message subtypes that can carry a trigger. Everything else (joins, topic changes,
-# deletions, ...) is ignored.
+# deletions, ...) is ignored. Edits (message_changed) are handled by the edit rule.
 TRIGGER_SUBTYPES = {None, "bot_message", "file_share", "thread_broadcast"}
+EDIT_SUBTYPE = "message_changed"
 
 # How many thread messages to scan when checking whether the agent has joined a thread
 THREAD_HISTORY_LIMIT = 100
@@ -57,10 +58,50 @@ class Provenance:
 
 @dataclass(frozen=True)
 class Trigger:
-    """A Slack event the bridge will start a run for: its kind and its provenance."""
+    """A Slack event the bridge will start a run for.
+
+    ``message`` is the Slack message the trigger is about, with its channel: the event
+    itself, or for an edit, the message as edited.
+    """
 
     kind: TriggerKind
     provenance: Provenance
+    message: dict
+
+
+@dataclass(frozen=True)
+class BotTriggerPolicy:
+    """Which bots may trigger the agent (ADR-0007). By default, none.
+
+    Bots must always mention the agent, except allowlisted bots in joined threads when
+    ``allowlisted_in_joined_threads`` is set.
+    """
+
+    allow: bool = False
+    allowlist: frozenset[str] = frozenset()
+    allowlisted_in_joined_threads: bool = False
+
+    def __post_init__(self):
+        if self.allowlisted_in_joined_threads and not self.allowlist:
+            raise ValueError(
+                "allowlisted_bots_in_joined_threads requires a bot_trigger_allowlist: it only "
+                "applies to allowlisted bots"
+            )
+        if self.allowlist and not self.allow:
+            logger.warning(
+                "bot_trigger_allowlist is set but allow_bot_triggers is False: no bot can "
+                "trigger the agent"
+            )
+
+    def admits(self, provenance: Provenance) -> bool:
+        """True if this bot may trigger at all."""
+        return self.allow and (not self.allowlist or self.is_allowlisted(provenance))
+
+    def is_allowlisted(self, provenance: Provenance) -> bool:
+        return bool({provenance.bot_id, provenance.app_id} & self.allowlist)
+
+    def may_skip_mention_in_joined_threads(self, provenance: Provenance) -> bool:
+        return self.allowlisted_in_joined_threads and self.is_allowlisted(provenance)
 
 
 @dataclass(frozen=True)
@@ -84,52 +125,101 @@ class TriggerGate:
         slack_client,
         get_identity: Callable[[], Awaitable[BridgeIdentity]],
         state: BridgeState,
+        bot_policy: BotTriggerPolicy = BotTriggerPolicy(),
     ):
         self._slack = slack_client
         self._get_identity = get_identity
         self._state = state
+        self._bots = bot_policy
 
     async def evaluate(self, event: dict, event_id: Optional[str] = None) -> Optional[Trigger]:
         """Return the trigger for ``event``, or None if it should not start a run.
 
         A trigger is claimed in bridge state as it's recognized, so a redelivery of the same
-        event (same ``event_id``, or same message and trigger kind) returns None.
+        event (same ``event_id``, or same message and trigger kind) returns None. The message
+        is also recorded as having started a run, which the edit rule checks.
         """
-        trigger = await self._classify(event)
+        if event.get("subtype") == EDIT_SUBTYPE:
+            trigger = await self._classify_edit(event)
+        elif event.get("subtype") in TRIGGER_SUBTYPES:
+            trigger = await self._classify_message(event)
+        else:
+            trigger = None
         if trigger is None:
             return None
-        if not await self._state.claim_trigger(
-            event_id, event.get("channel"), event.get("ts"), trigger.kind
-        ):
-            logger.info(f"Ignoring duplicate delivery of {event_id or event.get('ts')}")
+
+        channel_id, message_ts = trigger.message.get("channel"), trigger.message.get("ts")
+        if not await self._state.claim_trigger(event_id, channel_id, message_ts, trigger.kind):
+            logger.info(f"Ignoring duplicate delivery of {event_id or message_ts}")
             return None
+        await self._state.mark_started(channel_id, message_ts)
         return trigger
 
-    async def _classify(self, event: dict) -> Optional[Trigger]:
-        if event.get("subtype") not in TRIGGER_SUBTYPES:
-            return None
+    async def _admit_author(self, message: dict, identity: BridgeIdentity) -> Optional[Provenance]:
+        """The message author's provenance if they may trigger the agent at all, else None.
 
-        identity = await self._get_identity()
-        if identity.authored(event):
+        Shared by new messages and edits, so edits can't bypass author rules.
+        """
+        if message.get("subtype") not in TRIGGER_SUBTYPES:
             return None
-
-        provenance = Provenance.from_message(event)
+        if identity.authored(message):
+            return None
+        provenance = Provenance.from_message(message)
         if provenance.author_type == "bot":
+            return provenance if self._bots.admits(provenance) else None
+        return provenance if provenance.author_id else None
+
+    async def _classify_message(self, message: dict) -> Optional[Trigger]:
+        identity = await self._get_identity()
+        provenance = await self._admit_author(message, identity)
+        if provenance is None:
             return None
-        if not provenance.author_id:
+
+        mentioned = is_bot_mention(message.get("text", ""), identity.user_id)
+        thread_ts = message.get("thread_ts")
+        channel_id = message.get("channel")
+
+        if provenance.author_type == "bot":
+            # Bots must mention the agent (ADR-0007), except allowlisted bots that may
+            # converse in joined threads when the developer opted in
+            if mentioned:
+                return Trigger("mention", provenance, message)
+            if (
+                thread_ts
+                and self._bots.may_skip_mention_in_joined_threads(provenance)
+                and await self._is_joined_thread(channel_id, thread_ts, identity)
+            ):
+                return Trigger("joined_thread", provenance, message)
             return None
 
-        if is_dm(event):
-            return Trigger("direct_message", provenance)
-
-        if is_bot_mention(event.get("text", ""), identity.user_id):
-            return Trigger("mention", provenance)
-
-        thread_ts = event.get("thread_ts")
-        if thread_ts and await self._is_joined_thread(event.get("channel"), thread_ts, identity):
-            return Trigger("joined_thread", provenance)
-
+        if is_dm(message):
+            return Trigger("direct_message", provenance, message)
+        if mentioned:
+            return Trigger("mention", provenance, message)
+        if thread_ts and await self._is_joined_thread(channel_id, thread_ts, identity):
+            return Trigger("joined_thread", provenance, message)
         return None
+
+    async def _classify_edit(self, event: dict) -> Optional[Trigger]:
+        """An edit triggers only when it adds a mention of the agent to a message that
+        hasn't already started a run. Its author is gated like a new message's."""
+        message = {
+            **(event.get("message") or {}),
+            "channel": event.get("channel"),
+            "channel_type": event.get("channel_type"),
+        }
+        previous = event.get("previous_message") or {}
+        identity = await self._get_identity()
+        provenance = await self._admit_author(message, identity)
+        if provenance is None:
+            return None
+        if not is_bot_mention(message.get("text", ""), identity.user_id):
+            return None
+        if is_bot_mention(previous.get("text", ""), identity.user_id):
+            return None
+        if await self._state.has_started(message["channel"], message.get("ts")):
+            return None
+        return Trigger("edit", provenance, message)
 
     async def _is_joined_thread(
         self, channel_id: str, thread_ts: str, identity: BridgeIdentity

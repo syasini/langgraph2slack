@@ -21,7 +21,7 @@ from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
 from .state import BridgeState, DeploymentStateStore, StateStore
 from .transformers import DictTransformerChain, TransformerChain
-from .triggers import BridgeIdentity, TriggerGate
+from .triggers import BotTriggerPolicy, BridgeIdentity, TriggerGate
 from .utils import (
     TOOL_CALL_DETAILS_ACTION_ID,
     clean_markdown,
@@ -133,6 +133,9 @@ class SlackBot:
         multitask_strategy: Optional[str] = None,
         delete_interrupted_messages: bool = True,
         state_store: Optional[StateStore] = None,
+        allow_bot_triggers: bool = False,
+        bot_trigger_allowlist: Optional[list[str]] = None,
+        allowlisted_bots_in_joined_threads: bool = False,
     ):
         """Initialize SlackBot.
 
@@ -219,6 +222,15 @@ class SlackBot:
                 LangGraph store, or a bounded in-memory store (with a warning) when no store
                 is reachable. Pass any object implementing ``StateStore`` to use your own
                 storage.
+            allow_bot_triggers: Let other bots and integrations (CI, alerting, other agents)
+                trigger the agent by @-mentioning it (default: False). The agent's own messages
+                never trigger it. Runs carry the bot's provenance; the bridge enforces nothing
+                based on it.
+            bot_trigger_allowlist: When bot triggers are allowed, limit them to these bot IDs
+                (``B...``) or app IDs (``A...``). Default: any bot.
+            allowlisted_bots_in_joined_threads: Let allowlisted bots trigger the agent in
+                threads it has joined without mentioning it, e.g. a trusted companion agent
+                (default: False; bots must always mention the agent). Requires an allowlist.
         """
         logger.info("Initializing SlackBot...")
 
@@ -236,6 +248,13 @@ class SlackBot:
         # Resolve and validate multitask strategy (constructor overrides env; default "interrupt")
         self.multitask_strategy = self._resolve_multitask_strategy(multitask_strategy)
         self.delete_interrupted_messages = delete_interrupted_messages
+
+        # Who besides humans may trigger the agent (validated: raises ValueError)
+        self.bot_triggers = BotTriggerPolicy(
+            allow=allow_bot_triggers,
+            allowlist=frozenset(bot_trigger_allowlist or ()),
+            allowlisted_in_joined_threads=allowlisted_bots_in_joined_threads,
+        )
 
         # Store settings
         self.streaming_enabled = streaming
@@ -342,7 +361,9 @@ class SlackBot:
         self._slack_metadata_initialized = False
 
         # Decides which Slack payloads start a run
-        self._trigger_gate = TriggerGate(self.slack_app.client, self._get_identity, self.state)
+        self._trigger_gate = TriggerGate(
+            self.slack_app.client, self._get_identity, self.state, self.bot_triggers
+        )
 
         # Background task tracking for proper cleanup
         self._background_tasks: set[asyncio.Task] = set()
@@ -978,10 +999,12 @@ class SlackBot:
             )
 
             # Create context
-            context = MessageContext(event=event, trigger=trigger)
+            # For an edit, the trigger's message is the edited message, not the event
+            message = trigger.message
+            context = MessageContext(event=message, trigger=trigger)
 
             # Extract message text
-            message_text = event.get("text", "")
+            message_text = message.get("text", "")
 
             # Remove bot mention from text if present
             if self._bot_user_id:
@@ -1006,6 +1029,8 @@ class SlackBot:
                         message_text,
                         context,
                         bot_reactions=self.reactions,  # Pass reactions for bot message handling
+                        # Classic integrations have no user: stream to the bridge's own bot user
+                        recipient_user_id=context.user_id or self._bot_user_id,
                     )
 
                     # Add user-complete reactions after streaming completes (parallel)
@@ -1028,10 +1053,10 @@ class SlackBot:
                     # Determine thread_ts based on reply_in_thread setting
                     if self.reply_in_thread:
                         # Always reply in thread (use message ts if not already in thread)
-                        thread_ts = event.get("thread_ts") or event.get("ts")
+                        thread_ts = message.get("thread_ts") or message.get("ts")
                     else:
                         # Only reply in thread if message was already in a thread
-                        thread_ts = event.get("thread_ts")
+                        thread_ts = message.get("thread_ts")
 
                     # Check if we need bot-processing reactions
                     bot_processing_reactions = self._get_reactions_for("bot", "processing")
@@ -1194,6 +1219,11 @@ class SlackBot:
                             )
 
                     success = True
+
+            except Exception:
+                # The run never completed: let a corrective edit of this message trigger again
+                await self.state.unmark_started(context.channel_id, context.message_ts)
+                raise
 
             finally:
                 # Only remove non-persistent user reactions on success

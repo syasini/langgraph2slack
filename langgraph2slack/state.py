@@ -318,6 +318,7 @@ class BridgeState:
     TOOL_CALLS = "tool_calls"
     JOINED = "joined_conversations"
     DEDUPE = "duplicate_records"
+    STARTED = "started_messages"
     LAST_SEEN = "last_seen_markers"
     NAMES = "name_cache"
 
@@ -326,6 +327,7 @@ class BridgeState:
         TOOL_CALLS: 30 * DAY,
         JOINED: 90 * DAY,
         DEDUPE: 1 * DAY,
+        STARTED: 30 * DAY,
         LAST_SEEN: 90 * DAY,
         NAMES: 1 * DAY,
     }
@@ -401,3 +403,17 @@ class BridgeState:
                 return False
             await self._put(self.DEDUPE, key, {})
             return True
+
+    async def mark_started(self, channel_id: str, message_ts: str) -> None:
+        """Remember that a Slack message started a run (edits to it then don't trigger)."""
+        await self._put(self.STARTED, self._message_key(channel_id, message_ts), {})
+
+    async def unmark_started(self, channel_id: str, message_ts: str) -> None:
+        """Forget that a message started a run (its run failed before completing)."""
+        try:
+            await self.store.delete(self.STARTED, self._message_key(channel_id, message_ts))
+        except Exception as e:
+            logger.warning(f"Bridge state delete failed ({self.STARTED}): {e}")
+
+    async def has_started(self, channel_id: str, message_ts: str) -> bool:
+        return await self._get(self.STARTED, self._message_key(channel_id, message_ts)) is not None

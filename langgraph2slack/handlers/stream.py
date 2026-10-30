@@ -213,6 +213,7 @@ class StreamingHandler(BaseHandler):
         message: str,
         context: MessageContext,
         bot_reactions: list[dict] = None,
+        recipient_user_id: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Process message with streaming.
 
@@ -228,6 +229,8 @@ class StreamingHandler(BaseHandler):
             message: Raw message text from Slack
             context: Message context with user/channel info
             bot_reactions: List of reaction configs for bot message (default: None)
+            recipient_user_id: Slack user the stream is opened for (default: the trigger's
+                author). Slack requires one, so triggers without a user pass the bridge's own.
 
         Returns:
             Tuple of (stream_ts, thread_id, run_id) for feedback tracking. ``stream_ts`` is
@@ -277,7 +280,7 @@ class StreamingHandler(BaseHandler):
                 slack_channel=context.channel_id,
                 context=context,
                 slack_thread_ts=slack_thread_ts,
-                user_id=context.user_id,
+                user_id=recipient_user_id or context.user_id,
                 team_id=team_id,
                 bot_processing_reactions=bot_processing_reactions,
             )
