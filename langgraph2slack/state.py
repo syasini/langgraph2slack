@@ -35,6 +35,14 @@ def _now() -> float:
     return time.monotonic()
 
 
+def is_not_found(error: Exception) -> bool:
+    """True if a LangGraph SDK error is a 404 (missing item or thread), across SDK versions."""
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    return status == 404
+
+
 class StateStore(Protocol):
     """Namespaced key-value storage with per-item expiry.
 
@@ -124,7 +132,7 @@ class LangGraphStateStore:
         try:
             item = await self._store.get_item(self._namespace(namespace), key=key)
         except Exception as e:
-            if getattr(e, "status_code", None) == 404:
+            if is_not_found(e):
                 return None
             raise
         return item["value"] if item else None
@@ -417,3 +425,23 @@ class BridgeState:
 
     async def has_started(self, channel_id: str, message_ts: str) -> bool:
         return await self._get(self.STARTED, self._message_key(channel_id, message_ts)) is not None
+
+    # -- name cache --------------------------------------------------------
+
+    async def cached_name(self, kind: str, slack_id: str) -> Optional[str]:
+        """A cached user or channel name (``kind`` is "user" or "channel")."""
+        value = await self._get(self.NAMES, f"{kind}:{slack_id}")
+        return value.get("name") if value else None
+
+    async def cache_name(self, kind: str, slack_id: str, name: str) -> None:
+        await self._put(self.NAMES, f"{kind}:{slack_id}", {"name": name})
+
+    # -- last-seen markers -------------------------------------------------
+
+    async def last_seen(self, channel_id: str, conversation_ts: str) -> Optional[str]:
+        """Timestamp of the latest Slack message the agent has seen in a conversation."""
+        value = await self._get(self.LAST_SEEN, self._message_key(channel_id, conversation_ts))
+        return value.get("ts") if value else None
+
+    async def set_last_seen(self, channel_id: str, conversation_ts: str, ts: str) -> None:
+        await self._put(self.LAST_SEEN, self._message_key(channel_id, conversation_ts), {"ts": ts})

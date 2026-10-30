@@ -103,6 +103,7 @@ class StreamingHandler(BaseHandler):
         max_image_blocks: int = 5,
         metadata_builder=None,
         config_builder=None,
+        input_builder=None,
         message_types: list[str] = None,
         stream_buffer_time: float = 0.1,
         stream_buffer_max_chunks: int = 10,
@@ -127,6 +128,7 @@ class StreamingHandler(BaseHandler):
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
             config_builder: Async function to build config dict from MessageContext
+            input_builder: Async function (request, MessageContext) -> run input message
             message_types: List of message types to process (default: ["AIMessageChunk"])
             stream_buffer_time: Time in seconds to buffer chunks before flushing (default: 0.1).
                 Buffer flushes when EITHER this time elapses OR stream_buffer_max_chunks is reached.
@@ -152,6 +154,7 @@ class StreamingHandler(BaseHandler):
             show_tool_calls=show_tool_calls,
             show_tool_call_details=show_tool_call_details,
             state=state,
+            input_builder=input_builder,
         )
         # Store handler-specific attributes
         self.langgraph_client = langgraph_client
@@ -640,7 +643,7 @@ class StreamingHandler(BaseHandler):
             async for chunk in self.langgraph_client.runs.stream(
                 thread_id=langgraph_thread,
                 assistant_id=self.assistant_id,
-                input={"messages": [{"role": "user", "content": message}]},
+                input={"messages": [await self._build_run_message(message, context)]},
                 stream_mode=["messages-tuple"],
                 multitask_strategy=self.multitask_strategy,
                 if_not_exists="create",

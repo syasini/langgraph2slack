@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
 
+from .normalizer import message_markup
 from .state import BridgeState
 from .utils import is_bot_mention, is_dm
 
@@ -61,12 +62,14 @@ class Trigger:
     """A Slack event the bridge will start a run for.
 
     ``message`` is the Slack message the trigger is about, with its channel: the event
-    itself, or for an edit, the message as edited.
+    itself, or for an edit, the message as edited. ``occurred_ts`` is when the trigger
+    happened, when that's later than the message (an edit).
     """
 
     kind: TriggerKind
     provenance: Provenance
     message: dict
+    occurred_ts: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -175,7 +178,7 @@ class TriggerGate:
         if provenance is None:
             return None
 
-        mentioned = is_bot_mention(message.get("text", ""), identity.user_id)
+        mentioned = is_bot_mention(message_markup(message), identity.user_id)
         thread_ts = message.get("thread_ts")
         channel_id = message.get("channel")
 
@@ -213,13 +216,13 @@ class TriggerGate:
         provenance = await self._admit_author(message, identity)
         if provenance is None:
             return None
-        if not is_bot_mention(message.get("text", ""), identity.user_id):
+        if not is_bot_mention(message_markup(message), identity.user_id):
             return None
-        if is_bot_mention(previous.get("text", ""), identity.user_id):
+        if is_bot_mention(message_markup(previous), identity.user_id):
             return None
         if await self._state.has_started(message["channel"], message.get("ts")):
             return None
-        return Trigger("edit", provenance, message)
+        return Trigger("edit", provenance, message, event.get("event_ts") or event.get("ts"))
 
     async def _is_joined_thread(
         self, channel_id: str, thread_ts: str, identity: BridgeIdentity
