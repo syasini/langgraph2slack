@@ -19,6 +19,8 @@ Example:
 from .block_transformers import render_blocks, render_code_blocks, render_tables, render_todo_lists
 from .bot import SlackBot
 from .config import BotConfig, MessageContext
+from .framing import RequestedBy, TriggerInput
+from .normalizer import NormalizedMessage
 from .state import InMemoryStateStore, LangGraphStateStore, StateStore
 
 # Version is dynamically loaded from package metadata (pyproject.toml)
@@ -35,6 +37,9 @@ __all__ = [
     "SlackBot",
     "BotConfig",
     "MessageContext",
+    "TriggerInput",
+    "RequestedBy",
+    "NormalizedMessage",
     "StateStore",
     "InMemoryStateStore",
     "LangGraphStateStore",
