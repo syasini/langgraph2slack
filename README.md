@@ -399,7 +399,7 @@ By default, the following fields are passed:
 - `slack_channel_type`
 - `slack_is_dm`
 - `slack_is_thread`
-- `slack_trigger_kind`: how the run was triggered (`mention`, `direct_message`, `joined_thread`, `edit`)
+- `slack_trigger_kind`: how the run was triggered (`mention`, `direct_message`, `joined_thread`, `edit`, `shortcut`)
 - `slack_author_type`: `human` or `bot`
 - `slack_author_id`, `slack_bot_id`, `slack_app_id`: who authored the trigger
 - `slack_requester_id`: the human who triggered the run (`None` for bot triggers)
@@ -431,6 +431,27 @@ bot = SlackBot(
 Editing a message to add an @-mention of the agent triggers it like a new message, with
 trigger kind `edit`. Edits to a message that already started a run (fixing a typo, say) are
 ignored, and edits follow the same bot rules as new messages.
+
+### Message Shortcut
+
+**Ask agent about this** (a message shortcut, in any message's "⋯" menu) starts a run on that
+message, even a bot's post you can't edit. The reply lands in the message's thread (a new
+thread under it if it's top-level). The message and its thread are the context (the message
+is always included), a configurable instruction is the request, and the person who used the
+shortcut is the requester: provenance shows that human as the trigger's author, while the
+message's own author is labelled in the backfill. Where the app can't read or reply (a
+channel it isn't in, a DM between people), the person gets a private note instead.
+
+```python
+bot = SlackBot(
+    message_shortcut_callback_id="ask_agent",  # default; must match the manifest
+    message_shortcut_instruction="Take a look at this message and help with it.",
+)
+```
+
+Both example manifests include the shortcut. **Existing apps:** add a message shortcut with
+callback ID `ask_agent` under *Interactivity & Shortcuts*. Pass
+`message_shortcut_callback_id=None` to turn it off.
 
 ### Provenance in the Run Config
 

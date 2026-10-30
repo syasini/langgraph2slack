@@ -19,6 +19,13 @@ features:
     always_online: true
   assistant_view:
     assistant_description: your-assistant-description  # Replace with assistant description (e.g., "AI-powered assistant")
+  shortcuts:
+    # "Ask agent about this" on any message (callback_id must match SlackBot's
+    # message_shortcut_callback_id, "ask_agent" by default)
+    - name: Ask agent about this
+      type: message
+      callback_id: ask_agent
+      description: Ask the agent about this message
 
 oauth_config:
   scopes:

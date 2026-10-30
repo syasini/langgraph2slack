@@ -16,6 +16,7 @@ from langsmith import Client
 from pydantic import SecretStr
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.async_app import AsyncApp
+from slack_sdk.errors import SlackApiError
 
 from .backfill import BackfillCollector
 from .config import BotConfig, MessageContext
@@ -34,6 +35,7 @@ from .utils import (
     create_markdown_text_block,
     create_mrkdwn_text_block,
     extract_feedback_text,
+    post_response_url,
     replace_markdown_images_with_links,
 )
 
@@ -148,6 +150,8 @@ class SlackBot:
         max_image_bytes: int = 2_000_000,
         max_images: int = 4,
         max_inline_text_chars: int = 20_000,
+        message_shortcut_callback_id: Optional[str] = "ask_agent",
+        message_shortcut_instruction: str = "Take a look at this message and help with it.",
     ):
         """Initialize SlackBot.
 
@@ -258,6 +262,11 @@ class SlackBot:
                 Images stay in the conversation's checkpointed messages.
             max_inline_text_chars: Text files (logs, code, CSV, ...) up to this many characters
                 are inlined; larger ones are listed by reference (default: 20000).
+            message_shortcut_callback_id: Callback ID of the "Ask agent about this" message
+                shortcut, which starts a run on any message, in that message's thread
+                (default: "ask_agent"; must match the app manifest). None disables it.
+            message_shortcut_instruction: The request a shortcut run receives; the message it
+                was used on (and its thread) is the context.
         """
         logger.info("Initializing SlackBot...")
 
@@ -352,6 +361,8 @@ class SlackBot:
             max_chars=backfill_max_chars,
         )
         self._input_formatter: Optional[Callable] = None
+        self.message_shortcut_callback_id = message_shortcut_callback_id
+        self.message_shortcut_instruction = message_shortcut_instruction
 
         # Create appropriate handler based on streaming setting
         if self.streaming_enabled:
@@ -1074,258 +1085,28 @@ class SlackBot:
                 logger.debug(f"Ignoring message: {event.get('text', '')[:50]}")
                 return
 
-            logger.info(
-                f"Processing {trigger.kind} trigger from "
-                f"{trigger.provenance.author_type} {trigger.provenance.author_id}"
-            )
+            await self._run_trigger(trigger, say)
 
-            # Create context
-            # For an edit, the trigger's message is the edited message, not the event
-            message = trigger.message
-            context = MessageContext(event=message, trigger=trigger)
+        # Handler for the "Ask agent about this" message shortcut
+        if self.message_shortcut_callback_id:
 
-            # Start user-processing reactions in background (don't block handler); before
-            # reading files and backfill, so the user sees the trigger was picked up
-            user_processing_reactions = self._get_reactions_for("user", "processing")
-            if user_processing_reactions:
-                self._create_background_task(
-                    self._reactions.add_parallel(
-                        user_processing_reactions, context.channel_id, context.message_ts
+            @self.slack_app.shortcut(self.message_shortcut_callback_id)
+            async def handle_message_shortcut(ack, shortcut: dict, say):
+                """Start a run on the message the shortcut was used on."""
+                await ack()  # Acknowledge immediately
+                channel_type = await self._reachable_channel_type(shortcut)
+                if channel_type is None:
+                    await post_response_url(
+                        shortcut.get("response_url"),
+                        "I can't read or reply in this conversation. Add me to the channel "
+                        "and try again.",
                     )
+                    return
+                trigger = await self._trigger_gate.evaluate_shortcut(
+                    shortcut, self.message_shortcut_instruction, channel_type
                 )
-
-            # The request as markdown (without the agent's own mention), who asked, and
-            # any backfill from the Slack thread
-            normalized = await self._normalizer.normalize(
-                message, strip_mention_of=self._bot_user_id
-            )
-            message_text = normalized.text
-            context.requested_by = await self._requested_by(context, normalized)
-            context.files, context.backfill = self._cap_images(
-                normalized.files, await self._collect_backfill(context, trigger)
-            )
-
-            success = False
-            try:
-                # Process based on handler type
-                if self.streaming_enabled:
-                    # Streaming: handler sends response directly to Slack
-                    # Note: Handler will manage bot-processing and bot-complete reactions internally
-                    stream_ts, thread_id, run_id = await self.handler.process_message(
-                        message_text,
-                        context,
-                        bot_reactions=self.reactions,  # Pass reactions for bot message handling
-                        # Classic integrations have no user: stream to the bridge's own bot user
-                        recipient_user_id=context.user_id or self._bot_user_id,
-                    )
-
-                    # Add user-complete reactions after streaming completes (parallel)
-                    user_complete_reactions = self._get_reactions_for("user", "complete")
-                    if user_complete_reactions:
-                        await self._reactions.add_parallel(
-                            user_complete_reactions, context.channel_id, context.message_ts
-                        )
-
-                    # Store mapping for feedback
-                    if run_id and stream_ts:
-                        await self._remember_reply(context, stream_ts, thread_id, run_id)
-                    else:
-                        logger.warning("No run_id captured for streaming message")
-
-                    success = True
-
-                else:
-                    # Non-streaming: handler returns response, we send it
-                    # Determine thread_ts based on reply_in_thread setting
-                    if self.reply_in_thread:
-                        # Always reply in thread (use message ts if not already in thread)
-                        thread_ts = message.get("thread_ts") or message.get("ts")
-                    else:
-                        # Only reply in thread if message was already in a thread
-                        thread_ts = message.get("thread_ts")
-
-                    # Check if we need bot-processing reactions
-                    bot_processing_reactions = self._get_reactions_for("bot", "processing")
-                    placeholder_ts = None
-
-                    if bot_processing_reactions:
-                        # Send placeholder message to show we're thinking
-                        placeholder_result = await say(
-                            text="Thinking...",
-                            thread_ts=thread_ts,
-                        )
-                        placeholder_ts = (
-                            placeholder_result.get("ts") if placeholder_result else None
-                        )
-
-                        # Add bot-processing reactions to placeholder
-                        if placeholder_ts:
-                            for reaction in bot_processing_reactions:
-                                await self._reactions.add(
-                                    context.channel_id, placeholder_ts, reaction.get("emoji")
-                                )
-
-                    logger.info("Non-streaming mode: calling handler.process_message")
-                    response_text, blocks, thread_id, run_id, has_custom_blocks = (
-                        await self.handler.process_message(message_text, context)
-                    )
-                    logger.info(
-                        f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}, has_custom_blocks={has_custom_blocks}"
-                    )
-
-                    logger.info(
-                        f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks"
-                    )
-
-                    # Detect multi-message response: transformer returned list[list[dict]]
-                    is_multi_message = (
-                        has_custom_blocks and bool(blocks) and isinstance(blocks[0], list)
-                    )
-
-                    if is_multi_message:
-                        first_blocks, *rest_blocks = blocks
-                        # Send/update first chunk
-                        if placeholder_ts:
-                            await self.slack_app.client.chat_update(
-                                channel=context.channel_id,
-                                ts=placeholder_ts,
-                                text=response_text,
-                                blocks=first_blocks,
-                            )
-                            result = {"ts": placeholder_ts}
-                        else:
-                            result = await say(
-                                text=response_text,
-                                thread_ts=thread_ts,
-                                blocks=first_blocks,
-                            )
-                        # Send remaining chunks as follow-up messages in the same thread
-                        reply_thread = thread_ts or (result.get("ts") if result else None)
-                        for chunk_blocks in rest_blocks:
-                            await say(
-                                text=" ",
-                                thread_ts=reply_thread,
-                                blocks=chunk_blocks,
-                            )
-                        logger.info(f"Multi-message: sent {1 + len(rest_blocks)} messages")
-                    else:
-                        blocks = self._prepare_send_blocks(blocks, response_text, has_custom_blocks)
-                        logger.info(f"Prepared blocks for send: {len(blocks)} total")
-
-                    # Update placeholder or send new message
-                    if is_multi_message:
-                        pass  # already handled above
-                    elif placeholder_ts:
-                        # Update the placeholder message
-                        logger.info(f"Updating placeholder message {placeholder_ts}")
-                        try:
-                            await self.slack_app.client.chat_update(
-                                channel=context.channel_id,
-                                ts=placeholder_ts,
-                                text=response_text,
-                                blocks=blocks if blocks else None,
-                            )
-                            result = {"ts": placeholder_ts}
-                        except Exception as e:
-                            # Retry with a cleaned block list for known recoverable errors
-                            error_str = str(e)
-                            if "invalid_blocks" in error_str or "downloading image" in error_str:
-                                cleaned = _clean_blocks_for_retry(blocks, error_str)
-                                logger.warning(
-                                    f"Block update failed ({error_str}), retrying with cleaned blocks"
-                                )
-                                await self.slack_app.client.chat_update(
-                                    channel=context.channel_id,
-                                    ts=placeholder_ts,
-                                    text=response_text,
-                                    blocks=cleaned if cleaned else None,
-                                )
-                                result = {"ts": placeholder_ts}
-                            else:
-                                raise
-                    else:
-                        # Send message with blocks (or just text if no blocks)
-                        # Try sending with blocks first, fallback if Slack rejects them
-                        try:
-                            result = await say(
-                                text=response_text,  # Fallback text for notifications
-                                thread_ts=thread_ts,
-                                blocks=blocks if blocks else None,
-                            )
-                            logger.info(
-                                f"Message sent successfully, result ts={result.get('ts') if result else 'None'}"
-                            )
-                        except Exception as e:
-                            # Retry with a cleaned block list for known recoverable errors
-                            error_str = str(e)
-                            if "invalid_blocks" in error_str or "downloading image" in error_str:
-                                cleaned = _clean_blocks_for_retry(blocks, error_str)
-                                logger.warning(
-                                    f"Block send failed ({error_str}), retrying with cleaned blocks"
-                                )
-                                result = await say(
-                                    text=response_text,
-                                    thread_ts=thread_ts,
-                                    blocks=cleaned if cleaned else None,
-                                )
-                                logger.info(
-                                    f"Message sent with cleaned blocks, result ts={result.get('ts') if result else 'None'}"
-                                )
-                            else:
-                                # Some other error, re-raise it
-                                raise
-
-                    # Store mapping for feedback
-                    if run_id and result and result.get("ts"):
-                        await self._remember_reply(context, result["ts"], thread_id, run_id)
-                    else:
-                        logger.warning("No run_id captured for non-streaming message")
-
-                    # Add user-complete reactions (parallel)
-                    user_complete_reactions = self._get_reactions_for("user", "complete")
-                    if user_complete_reactions:
-                        await self._reactions.add_parallel(
-                            user_complete_reactions, context.channel_id, context.message_ts
-                        )
-
-                    # Remove bot-processing reactions and add bot-complete reactions
-                    if result and result.get("ts"):
-                        # Remove bot-processing reactions if not persistent
-                        for reaction in bot_processing_reactions:
-                            if not reaction.get("persist", False):
-                                await self._reactions.remove(
-                                    context.channel_id, result["ts"], reaction.get("emoji")
-                                )
-
-                        # Add bot-complete reactions to the bot's response (parallel)
-                        bot_complete_reactions = self._get_reactions_for("bot", "complete")
-                        if bot_complete_reactions:
-                            await self._reactions.add_parallel(
-                                bot_complete_reactions, context.channel_id, result["ts"]
-                            )
-
-                    success = True
-
-            except Exception:
-                # The run never completed: let a corrective edit of this message trigger again
-                await self.state.unmark_started(context.channel_id, context.message_ts)
-                raise
-
-            finally:
-                if success:
-                    await self._backfill.advance(
-                        context.channel_id,
-                        context.conversation_ts,
-                        trigger.occurred_ts or context.message_ts,
-                    )
-                # Only remove non-persistent user reactions on success
-                # On error, keep them as visual indicators that something went wrong
-                if success:
-                    for reaction in self.reactions:
-                        if reaction.get("target") == "user" and not reaction.get("persist", False):
-                            await self._reactions.remove(
-                                context.channel_id, context.message_ts, reaction.get("emoji")
-                            )
+                if trigger is not None:
+                    await self._run_trigger(trigger, say)
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")
@@ -1525,8 +1306,299 @@ class SlackBot:
 
         logger.info("Slack event handlers registered")
 
+    async def _run_trigger(self, trigger: Trigger, say) -> None:
+        """Start a run for a trigger and deliver its reply to Slack.
+
+        Shared by every way in: message events (mentions, DMs, joined threads, edits) and
+        the message shortcut.
+
+        Args:
+            trigger: The trigger the gate recognized
+            say: Bolt's say() for the trigger's channel (used by non-streaming replies)
+        """
+        logger.info(
+            f"Processing {trigger.kind} trigger from "
+            f"{trigger.provenance.author_type} {trigger.provenance.author_id}"
+        )
+
+        # Create context
+        # For an edit, the trigger's message is the edited message, not the event
+        message = trigger.message
+        context = MessageContext(event=message, trigger=trigger)
+
+        # Start user-processing reactions in background (don't block handler); before
+        # reading files and backfill, so the user sees the trigger was picked up
+        user_processing_reactions = self._get_reactions_for("user", "processing")
+        if user_processing_reactions:
+            self._create_background_task(
+                self._reactions.add_parallel(
+                    user_processing_reactions, context.channel_id, context.message_ts
+                )
+            )
+
+        # The request as markdown (without the agent's own mention), who asked, and
+        # any backfill from the Slack thread. A shortcut's request is its instruction: the
+        # message it was used on arrives as backfill.
+        if trigger.subject is not None:
+            normalized, message_text, files = None, trigger.request or "", ()
+        else:
+            normalized = await self._normalizer.normalize(
+                message, strip_mention_of=self._bot_user_id
+            )
+            message_text, files = normalized.text, normalized.files
+        context.requested_by = await self._requested_by(context, normalized)
+        context.files, context.backfill = self._cap_images(
+            files, await self._collect_backfill(context, trigger)
+        )
+
+        success = False
+        try:
+            # Process based on handler type
+            if self.streaming_enabled:
+                # Streaming: handler sends response directly to Slack
+                # Note: Handler will manage bot-processing and bot-complete reactions internally
+                stream_ts, thread_id, run_id = await self.handler.process_message(
+                    message_text,
+                    context,
+                    bot_reactions=self.reactions,  # Pass reactions for bot message handling
+                    # Stream to whoever asked; classic integrations have no user, so the
+                    # bridge's own bot user stands in
+                    recipient_user_id=context.requester_id or context.user_id or self._bot_user_id,
+                )
+
+                # Add user-complete reactions after streaming completes (parallel)
+                user_complete_reactions = self._get_reactions_for("user", "complete")
+                if user_complete_reactions:
+                    await self._reactions.add_parallel(
+                        user_complete_reactions, context.channel_id, context.message_ts
+                    )
+
+                # Store mapping for feedback
+                if run_id and stream_ts:
+                    await self._remember_reply(context, stream_ts, thread_id, run_id)
+                else:
+                    logger.warning("No run_id captured for streaming message")
+
+                success = True
+
+            else:
+                # Non-streaming: handler returns response, we send it
+                # Determine thread_ts based on reply_in_thread setting
+                if self.reply_in_thread:
+                    # Always reply in thread (use message ts if not already in thread)
+                    thread_ts = message.get("thread_ts") or message.get("ts")
+                else:
+                    # Only reply in thread if message was already in a thread
+                    thread_ts = message.get("thread_ts")
+
+                # Check if we need bot-processing reactions
+                bot_processing_reactions = self._get_reactions_for("bot", "processing")
+                placeholder_ts = None
+
+                if bot_processing_reactions:
+                    # Send placeholder message to show we're thinking
+                    placeholder_result = await say(
+                        text="Thinking...",
+                        thread_ts=thread_ts,
+                    )
+                    placeholder_ts = placeholder_result.get("ts") if placeholder_result else None
+
+                    # Add bot-processing reactions to placeholder
+                    if placeholder_ts:
+                        for reaction in bot_processing_reactions:
+                            await self._reactions.add(
+                                context.channel_id, placeholder_ts, reaction.get("emoji")
+                            )
+
+                logger.info("Non-streaming mode: calling handler.process_message")
+                response_text, blocks, thread_id, run_id, has_custom_blocks = (
+                    await self.handler.process_message(message_text, context)
+                )
+                logger.info(
+                    f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}, has_custom_blocks={has_custom_blocks}"
+                )
+
+                logger.info(
+                    f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks"
+                )
+
+                # Detect multi-message response: transformer returned list[list[dict]]
+                is_multi_message = (
+                    has_custom_blocks and bool(blocks) and isinstance(blocks[0], list)
+                )
+
+                if is_multi_message:
+                    first_blocks, *rest_blocks = blocks
+                    # Send/update first chunk
+                    if placeholder_ts:
+                        await self.slack_app.client.chat_update(
+                            channel=context.channel_id,
+                            ts=placeholder_ts,
+                            text=response_text,
+                            blocks=first_blocks,
+                        )
+                        result = {"ts": placeholder_ts}
+                    else:
+                        result = await say(
+                            text=response_text,
+                            thread_ts=thread_ts,
+                            blocks=first_blocks,
+                        )
+                    # Send remaining chunks as follow-up messages in the same thread
+                    reply_thread = thread_ts or (result.get("ts") if result else None)
+                    for chunk_blocks in rest_blocks:
+                        await say(
+                            text=" ",
+                            thread_ts=reply_thread,
+                            blocks=chunk_blocks,
+                        )
+                    logger.info(f"Multi-message: sent {1 + len(rest_blocks)} messages")
+                else:
+                    blocks = self._prepare_send_blocks(blocks, response_text, has_custom_blocks)
+                    logger.info(f"Prepared blocks for send: {len(blocks)} total")
+
+                # Update placeholder or send new message
+                if is_multi_message:
+                    pass  # already handled above
+                elif placeholder_ts:
+                    # Update the placeholder message
+                    logger.info(f"Updating placeholder message {placeholder_ts}")
+                    try:
+                        await self.slack_app.client.chat_update(
+                            channel=context.channel_id,
+                            ts=placeholder_ts,
+                            text=response_text,
+                            blocks=blocks if blocks else None,
+                        )
+                        result = {"ts": placeholder_ts}
+                    except Exception as e:
+                        # Retry with a cleaned block list for known recoverable errors
+                        error_str = str(e)
+                        if "invalid_blocks" in error_str or "downloading image" in error_str:
+                            cleaned = _clean_blocks_for_retry(blocks, error_str)
+                            logger.warning(
+                                f"Block update failed ({error_str}), retrying with cleaned blocks"
+                            )
+                            await self.slack_app.client.chat_update(
+                                channel=context.channel_id,
+                                ts=placeholder_ts,
+                                text=response_text,
+                                blocks=cleaned if cleaned else None,
+                            )
+                            result = {"ts": placeholder_ts}
+                        else:
+                            raise
+                else:
+                    # Send message with blocks (or just text if no blocks)
+                    # Try sending with blocks first, fallback if Slack rejects them
+                    try:
+                        result = await say(
+                            text=response_text,  # Fallback text for notifications
+                            thread_ts=thread_ts,
+                            blocks=blocks if blocks else None,
+                        )
+                        logger.info(
+                            f"Message sent successfully, result ts={result.get('ts') if result else 'None'}"
+                        )
+                    except Exception as e:
+                        # Retry with a cleaned block list for known recoverable errors
+                        error_str = str(e)
+                        if "invalid_blocks" in error_str or "downloading image" in error_str:
+                            cleaned = _clean_blocks_for_retry(blocks, error_str)
+                            logger.warning(
+                                f"Block send failed ({error_str}), retrying with cleaned blocks"
+                            )
+                            result = await say(
+                                text=response_text,
+                                thread_ts=thread_ts,
+                                blocks=cleaned if cleaned else None,
+                            )
+                            logger.info(
+                                f"Message sent with cleaned blocks, result ts={result.get('ts') if result else 'None'}"
+                            )
+                        else:
+                            # Some other error, re-raise it
+                            raise
+
+                # Store mapping for feedback
+                if run_id and result and result.get("ts"):
+                    await self._remember_reply(context, result["ts"], thread_id, run_id)
+                else:
+                    logger.warning("No run_id captured for non-streaming message")
+
+                # Add user-complete reactions (parallel)
+                user_complete_reactions = self._get_reactions_for("user", "complete")
+                if user_complete_reactions:
+                    await self._reactions.add_parallel(
+                        user_complete_reactions, context.channel_id, context.message_ts
+                    )
+
+                # Remove bot-processing reactions and add bot-complete reactions
+                if result and result.get("ts"):
+                    # Remove bot-processing reactions if not persistent
+                    for reaction in bot_processing_reactions:
+                        if not reaction.get("persist", False):
+                            await self._reactions.remove(
+                                context.channel_id, result["ts"], reaction.get("emoji")
+                            )
+
+                    # Add bot-complete reactions to the bot's response (parallel)
+                    bot_complete_reactions = self._get_reactions_for("bot", "complete")
+                    if bot_complete_reactions:
+                        await self._reactions.add_parallel(
+                            bot_complete_reactions, context.channel_id, result["ts"]
+                        )
+
+                success = True
+
+        except Exception:
+            # The run never completed: let a corrective edit of this message trigger again
+            if trigger.subject is None:
+                await self.state.unmark_started(context.channel_id, context.message_ts)
+            raise
+
+        finally:
+            if success:
+                await self._backfill.advance(
+                    context.channel_id,
+                    context.conversation_ts,
+                    trigger.occurred_ts or context.message_ts,
+                )
+            # Only remove non-persistent user reactions on success
+            # On error, keep them as visual indicators that something went wrong
+            if success:
+                for reaction in self.reactions:
+                    if reaction.get("target") == "user" and not reaction.get("persist", False):
+                        await self._reactions.remove(
+                            context.channel_id, context.message_ts, reaction.get("emoji")
+                        )
+
+    async def _reachable_channel_type(self, shortcut: dict) -> Optional[str]:
+        """The conversation's type if the bridge can read and reply there, else None.
+
+        A shortcut can be used anywhere, including channels the app isn't in and direct
+        messages between people, where a run would have no context and nowhere to reply.
+        """
+        channel_id = (shortcut.get("channel") or {}).get("id", "")
+        try:
+            channel = (await self.slack_app.client.conversations_info(channel=channel_id))[
+                "channel"
+            ]
+        except SlackApiError as e:
+            if e.response.get("error") in ("channel_not_found", "not_in_channel"):
+                return None
+            logger.warning(f"Could not check conversation {channel_id}: {e}")
+            return "channel"  # can't tell (e.g. a missing scope): try anyway
+        if channel.get("is_im"):
+            return "im"
+        if channel.get("is_member") is False:
+            return None
+        if channel.get("is_mpim"):
+            return "mpim"
+        return "group" if channel.get("is_private") or channel.get("is_group") else "channel"
+
     async def _requested_by(
-        self, context: MessageContext, trigger_message: NormalizedMessage
+        self, context: MessageContext, trigger_message: Optional[NormalizedMessage]
     ) -> RequestedBy:
         """Who the request line names: the requester, or else the triggering bot."""
         if context.requester_id:
@@ -1546,6 +1618,7 @@ class SlackBot:
             thread_id=self.handler.conversation_thread_id(context),
             identity=await self._get_identity(),
             until_ts=trigger.occurred_ts,
+            subject=trigger.subject,
         )
 
     def _cap_images(
