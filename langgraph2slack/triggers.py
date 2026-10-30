@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
 
+from .state import BridgeState
 from .utils import is_bot_mention, is_dm
 
 logger = logging.getLogger(__name__)
@@ -82,12 +83,29 @@ class TriggerGate:
         self,
         slack_client,
         get_identity: Callable[[], Awaitable[BridgeIdentity]],
+        state: BridgeState,
     ):
         self._slack = slack_client
         self._get_identity = get_identity
+        self._state = state
 
-    async def evaluate(self, event: dict) -> Optional[Trigger]:
-        """Return the trigger for ``event``, or None if it should not start a run."""
+    async def evaluate(self, event: dict, event_id: Optional[str] = None) -> Optional[Trigger]:
+        """Return the trigger for ``event``, or None if it should not start a run.
+
+        A trigger is claimed in bridge state as it's recognized, so a redelivery of the same
+        event (same ``event_id``, or same message and trigger kind) returns None.
+        """
+        trigger = await self._classify(event)
+        if trigger is None:
+            return None
+        if not await self._state.claim_trigger(
+            event_id, event.get("channel"), event.get("ts"), trigger.kind
+        ):
+            logger.info(f"Ignoring duplicate delivery of {event_id or event.get('ts')}")
+            return None
+        return trigger
+
+    async def _classify(self, event: dict) -> Optional[Trigger]:
         if event.get("subtype") not in TRIGGER_SUBTYPES:
             return None
 
@@ -116,7 +134,13 @@ class TriggerGate:
     async def _is_joined_thread(
         self, channel_id: str, thread_ts: str, identity: BridgeIdentity
     ) -> bool:
-        """True if the agent has already posted in this Slack thread."""
+        """True if the agent has already posted in this Slack thread.
+
+        Remembered threads are answered from bridge state; Slack's thread history is read
+        only when there's no record, and a hit there is remembered.
+        """
+        if await self._state.is_joined(channel_id, thread_ts):
+            return True
         try:
             history = await self._slack.conversations_replies(
                 channel=channel_id, ts=thread_ts, limit=THREAD_HISTORY_LIMIT
@@ -124,4 +148,7 @@ class TriggerGate:
         except Exception as e:
             logger.warning(f"Could not check thread history: {e}")
             return False
-        return any(identity.authored(m) for m in history.get("messages", []))
+        if any(identity.authored(m) for m in history.get("messages", [])):
+            await self._state.mark_joined(channel_id, thread_ts)
+            return True
+        return False

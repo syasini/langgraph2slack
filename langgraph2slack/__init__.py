@@ -19,6 +19,7 @@ Example:
 from .block_transformers import render_blocks, render_code_blocks, render_tables, render_todo_lists
 from .bot import SlackBot
 from .config import BotConfig, MessageContext
+from .state import InMemoryStateStore, LangGraphStateStore, StateStore
 
 # Version is dynamically loaded from package metadata (pyproject.toml)
 # Use `uv version --bump patch|minor|major` to update version
@@ -34,6 +35,9 @@ __all__ = [
     "SlackBot",
     "BotConfig",
     "MessageContext",
+    "StateStore",
+    "InMemoryStateStore",
+    "LangGraphStateStore",
     "render_blocks",
     "render_tables",
     "render_todo_lists",
