@@ -20,6 +20,7 @@ from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
 from .mixins import ReactionMixin
 from .transformers import DictTransformerChain, TransformerChain
+from .triggers import BridgeIdentity, TriggerGate
 from .utils import (
     TOOL_CALL_DETAILS_ACTION_ID,
     clean_markdown,
@@ -27,8 +28,6 @@ from .utils import (
     create_markdown_text_block,
     create_mrkdwn_text_block,
     extract_feedback_text,
-    is_bot_mention,
-    is_dm,
     replace_markdown_images_with_links,
 )
 
@@ -333,9 +332,13 @@ class SlackBot:
 
         # Slack metadata cache (lazy initialization)
         self._bot_user_id: Optional[str] = None
+        self._bot_id: Optional[str] = None
         self._team_id: Optional[str] = None
         self._slack_metadata_lock = asyncio.Lock()
         self._slack_metadata_initialized = False
+
+        # Decides which Slack payloads start a run
+        self._trigger_gate = TriggerGate(self.slack_app.client, self._get_identity)
 
         # Background task tracking for proper cleanup
         self._background_tasks: set[asyncio.Task] = set()
@@ -825,11 +828,18 @@ class SlackBot:
             logger.info("Fetching Slack metadata (bot_user_id, team_id) via auth_test()...")
             auth_info = await self.slack_app.client.auth_test()
             self._bot_user_id = auth_info["user_id"]
+            self._bot_id = auth_info.get("bot_id")
             self._team_id = auth_info["team_id"]
             self._slack_metadata_initialized = True
             logger.info(
-                f"Cached Slack metadata: bot_user_id={self._bot_user_id}, team_id={self._team_id}"
+                f"Cached Slack metadata: bot_user_id={self._bot_user_id}, "
+                f"bot_id={self._bot_id}, team_id={self._team_id}"
             )
+
+    async def _get_identity(self) -> BridgeIdentity:
+        """The bridge's own Slack identity (cached after the first auth check)."""
+        await self._ensure_slack_metadata()
+        return BridgeIdentity(user_id=self._bot_user_id, bot_id=self._bot_id)
 
     def _create_fastapi_app(self) -> FastAPI:
         """Create FastAPI app with Slack routes.
@@ -912,23 +922,31 @@ class SlackBot:
             "slack_channel_type": context.channel_type,
             "slack_is_dm": context.is_dm,
             "slack_is_thread": context.is_thread,
+            "slack_trigger_kind": context.trigger_kind,
+            "slack_author_type": context.author_type,
+            "slack_author_id": context.author_id,
+            "slack_bot_id": context.bot_id,
+            "slack_app_id": context.app_id,
+            "slack_requester_id": context.requester_id,
         }
 
-    async def _build_config(self, context: MessageContext) -> dict | None:
+    async def _build_config(self, context: MessageContext) -> dict:
         """Build config dict for LangGraph agent.
 
-        Config transformers inject configurable fields that the agent graph
-        reads via get_config(). Returns None if no transformers are registered.
+        The config always carries the trigger's provenance under
+        ``configurable["slack"]``. Config transformers then run on it and may read,
+        change or extend it; the agent graph reads the result via get_config().
 
         Args:
             context: Message context with Slack event data
 
         Returns:
-            Config dict with "configurable" key, or None if no transformers
+            Config dict with "configurable" key
         """
+        config = {"configurable": {"slack": context.slack_run_config()}}
         if not self._config_transformers:
-            return None
-        return await self._config_transformers.apply({}, context)
+            return config
+        return await self._config_transformers.apply(config, context)
 
     def _setup_slack_handlers(self) -> None:
         """Setup Slack event handlers.
@@ -944,15 +962,18 @@ class SlackBot:
             """Handle incoming message events."""
             await ack()  # Acknowledge receipt immediately
 
-            # Check if we should process this message
-            if not await self._should_process_message(event):
+            trigger = await self._trigger_gate.evaluate(event)
+            if trigger is None:
                 logger.debug(f"Ignoring message: {event.get('text', '')[:50]}")
                 return
 
-            logger.info(f"Processing message from {event.get('user')}")
+            logger.info(
+                f"Processing {trigger.kind} trigger from "
+                f"{trigger.provenance.author_type} {trigger.provenance.author_id}"
+            )
 
             # Create context
-            context = MessageContext(event=event)
+            context = MessageContext(event=event, trigger=trigger)
 
             # Extract message text
             message_text = event.get("text", "")
@@ -1440,67 +1461,3 @@ class SlackBot:
         )
 
         logger.info(f"Feedback submitted successfully for run {run_id}")
-
-    async def _should_process_message(self, event: dict) -> bool:
-        """Determine if we should process this message.
-
-        We process messages if:
-        - Bot is mentioned (in a channel)
-        - Message is a DM to the bot
-        - Message has a user (not from another bot)
-
-        Args:
-            event: Slack message event dict
-
-        Returns:
-            True if we should process this message
-        """
-        # Skip messages without a user (e.g., bot messages, system messages)
-        if not event.get("user"):
-            return False
-
-        # Skip messages from bots (including ourselves)
-        if event.get("bot_id"):
-            return False
-
-        # Ensure Slack metadata is cached (fetches once, then cached forever)
-        await self._ensure_slack_metadata()
-
-        # Check if this is a DM
-        if is_dm(event):
-            logger.debug("Message is a DM - processing")
-            return True
-
-        # Check if we're in a thread where the bot has already participated
-        thread_ts = event.get("thread_ts")
-        if thread_ts:
-            # We're in a thread - check conversation history to see if bot has participated
-            channel_id = event.get("channel")
-
-            try:
-                # Fetch thread history to check if bot has responded
-                thread_history = await self.slack_app.client.conversations_replies(
-                    channel=channel_id, ts=thread_ts, limit=100  # Check last 100 messages in thread
-                )
-
-                # Check if any message in the thread is from the bot
-                for message in thread_history.get("messages", []):
-                    if message.get("user") == self._bot_user_id or message.get("bot_id"):
-                        # Check if it's our bot specifically
-                        if message.get("user") == self._bot_user_id:
-                            logger.debug(
-                                f"Bot has participated in thread {thread_ts} - processing without mention"
-                            )
-                            return True
-            except Exception as e:
-                logger.warning(f"Could not check thread history: {e}")
-                # Fall through to mention check if history lookup fails
-
-        # Check if bot is mentioned
-        message_text = event.get("text", "")
-        if is_bot_mention(message_text, self._bot_user_id):
-            logger.debug("Bot is mentioned - processing")
-            return True
-
-        # Not a DM, not in an active thread, and bot not mentioned - skip
-        return False

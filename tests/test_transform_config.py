@@ -47,8 +47,8 @@ class TestBuildConfig:
     """Test the _build_config method."""
 
     @pytest.mark.asyncio
-    async def test_build_config_no_transformers_returns_none(self, slack_bot):
-        """_build_config should return None when no transformers registered."""
+    async def test_build_config_no_transformers_carries_only_provenance(self, slack_bot):
+        """Without transformers, config holds just the Slack provenance entry."""
         event = {
             "user": "U123",
             "channel": "C456",
@@ -58,7 +58,9 @@ class TestBuildConfig:
         context = MessageContext(event)
 
         config = await slack_bot._build_config(context)
-        assert config is None
+        assert list(config) == ["configurable"]
+        assert list(config["configurable"]) == ["slack"]
+        assert config["configurable"]["slack"]["author_id"] == "U123"
 
     @pytest.mark.asyncio
     async def test_build_config_with_transformer(self, slack_bot):
