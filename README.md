@@ -320,6 +320,36 @@ By default, the following fields are passed:
 - `slack_channel_type`
 - `slack_is_dm`
 - `slack_is_thread`
+- `slack_trigger_kind`: how the run was triggered (`mention`, `direct_message`, `joined_thread`)
+- `slack_author_type`: `human` or `bot`
+- `slack_author_id`, `slack_bot_id`, `slack_app_id`: who authored the trigger
+- `slack_requester_id`: the human who triggered the run (`None` for bot triggers)
+
+### Provenance in the Run Config
+
+Every run's config carries the trigger's **provenance** under `configurable["slack"]`, whether
+or not metadata is enabled, so the graph can read it at runtime without parsing text:
+
+```python
+from langgraph.config import get_config
+
+def my_node(state):
+    slack = get_config()["configurable"]["slack"]
+    # {"trigger_kind": "mention", "author_type": "human", "author_id": "U123",
+    #  "bot_id": None, "app_id": None, "requester_id": "U123",
+    #  "channel_id": "C456", "channel_type": "channel",
+    #  "message_ts": "1700000000.000200", "thread_ts": "1700000000.000100",
+    #  "conversation_ts": "1700000000.000100"}
+    ...
+```
+
+`thread_ts` is Slack's raw thread timestamp (`None` for a top-level message). `conversation_ts`
+is the root of the Slack thread the conversation maps to: the thread for a reply, otherwise
+the triggering message itself.
+
+The entry is filled in before config transformers run, so `@bot.transform_config` functions
+can read, change or extend it. The bridge only passes provenance along; deciding what to do
+with it (for example, restricting tools when a bot triggered the run) is up to your agent.
 
 ### Streaming Mode Control
 

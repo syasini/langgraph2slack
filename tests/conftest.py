@@ -5,8 +5,53 @@ Fixtures are automatically discovered by pytest and available to all test files.
 """
 
 import pytest
+
 from langgraph2slack import SlackBot
 from langgraph2slack.config import MessageContext
+
+from .harness import (
+    ASSISTANT_ID,
+    BOT_TOKEN,
+    SIGNING_SECRET,
+    FakeLangGraphDeployment,
+    FakeSlackWorkspace,
+    build_bridge,
+    route_slack_api,
+)
+
+# ============================================================================
+# Bridge harness (fake Slack workspace + fake LangGraph deployment)
+# ============================================================================
+
+
+@pytest.fixture
+def slack():
+    """A fake Slack workspace; every Slack Web API call is routed to it for the test."""
+    workspace = FakeSlackWorkspace()
+    patcher = route_slack_api(workspace)
+    yield workspace
+    patcher.stop()
+
+
+@pytest.fixture
+def deployment():
+    """A fake LangGraph deployment that records runs."""
+    return FakeLangGraphDeployment()
+
+
+@pytest.fixture
+def make_bridge(slack, deployment, monkeypatch):
+    """Factory: build a SlackBot against the shared fakes. Call twice to simulate a restart."""
+    monkeypatch.setenv("SLACK_BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", SIGNING_SECRET)
+    monkeypatch.setenv("ASSISTANT_ID", ASSISTANT_ID)
+    monkeypatch.delenv("LANGGRAPH_URL", raising=False)
+    monkeypatch.delenv("MULTITASK_STRATEGY", raising=False)
+
+    def factory(**slackbot_kwargs):
+        return build_bridge(slack, deployment, **slackbot_kwargs)
+
+    return factory
 
 
 # ============================================================================
