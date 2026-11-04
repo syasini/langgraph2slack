@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "plant-bot"
 version = "0.1.0"
 description = "Plant care recommendation bot using LangGraph and Slack"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 dependencies = [
     # LangGraph and LangChain
@@ -16,9 +16,8 @@ dependencies = [
     "langgraph-cli[inmem]>=0.1.0",
     # Tavily search - using new langchain-tavily package
     "langchain-tavily>=0.2.0",
-    # langgraph2slack - for local dev, install from parent directory
-    # After publishing to PyPI, this would be: "langgraph2slack>=0.1.0"
-    "langgraph2slack @ file:///Users/siavashyasini/MyDrive/projects/langgraph2slack",
+    # langgraph2slack - installed from the repo root for local dev (see [tool.uv.sources])
+    "langgraph2slack",
 ]
 
 [project.optional-dependencies]
@@ -36,3 +35,6 @@ dev = [
 [tool.setuptools]
 # This is an application, not a package - no modules to install
 py-modules = []
+
+[tool.uv.sources]
+langgraph2slack = { path = "../..", editable = true }
