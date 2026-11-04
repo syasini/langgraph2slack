@@ -922,12 +922,7 @@ class SlackBot:
             "slack_channel_type": context.channel_type,
             "slack_is_dm": context.is_dm,
             "slack_is_thread": context.is_thread,
-            "slack_trigger_kind": context.trigger_kind,
-            "slack_author_type": context.author_type,
-            "slack_author_id": context.author_id,
-            "slack_bot_id": context.bot_id,
-            "slack_app_id": context.app_id,
-            "slack_requester_id": context.requester_id,
+            **{f"slack_{name}": value for name, value in context.provenance_fields().items()},
         }
 
     async def _build_config(self, context: MessageContext) -> dict:
@@ -935,7 +930,9 @@ class SlackBot:
 
         The config always carries the trigger's provenance under
         ``configurable["slack"]``. Config transformers then run on it and may read,
-        change or extend it; the agent graph reads the result via get_config().
+        change or extend it; the agent graph reads the result via get_config(). If a
+        transformer's result lacks the entry (it built a fresh dict, or took only the
+        context), the entry is put back.
 
         Args:
             context: Message context with Slack event data
@@ -946,7 +943,10 @@ class SlackBot:
         config = {"configurable": {"slack": context.slack_run_config()}}
         if not self._config_transformers:
             return config
-        return await self._config_transformers.apply(config, context)
+        config = await self._config_transformers.apply(config, context)
+        configurable = config.setdefault("configurable", {})
+        configurable.setdefault("slack", context.slack_run_config())
+        return config
 
     def _setup_slack_handlers(self) -> None:
         """Setup Slack event handlers.

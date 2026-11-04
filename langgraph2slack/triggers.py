@@ -2,8 +2,10 @@
 
 A **trigger** is a Slack event that makes the bridge start a run. The gate classifies it by
 kind (mention, direct message, joined thread, ...) and records its **provenance**: who
-authored it, human or bot. Provenance is passed along to the agent; the bridge enforces
-nothing based on it (ADR-0001).
+authored it, human or bot, and which human (if any) is the requester. Provenance is passed
+along to the agent, which decides what to do with it (ADR-0001). The bridge's only
+provenance-based rule is ADR-0007's: bot-authored messages trigger only when the developer
+opts in.
 """
 
 import logging

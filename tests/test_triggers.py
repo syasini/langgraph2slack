@@ -6,10 +6,10 @@ and with what input, metadata and config.
 
 import pytest
 
-from .harness import AGENT_BOT_ID, AGENT_USER_ID
+from .harness import AGENT_BOT_ID, AGENT_USER_ID, HUMAN_USER_ID
 
 MENTION = f"<@{AGENT_USER_ID}>"
-HUMAN = "U0HUMAN"
+HUMAN = HUMAN_USER_ID
 
 
 @pytest.fixture(params=[True, False], ids=["streaming", "non-streaming"])
@@ -361,3 +361,75 @@ async def test_metadata_transformers_see_provenance_on_the_context(bridge):
         "author_type": "human",
         "requester": HUMAN,
     }
+
+
+# ============================================================================
+# Ported edge cases from the old private-method tests
+# ============================================================================
+
+
+async def test_message_with_a_user_and_a_bot_id_counts_as_a_bot(streaming_bridge):
+    await streaming_bridge.send_event(
+        {
+            "type": "message",
+            "channel": "D0DM",
+            "channel_type": "im",
+            "user": "U0APPBOT",
+            "bot_id": "B0APP",
+            "text": f"{MENTION} hello",
+        }
+    )
+
+    assert streaming_bridge.runs == []
+
+
+@pytest.mark.parametrize("user", ["", None], ids=["empty", "none"])
+async def test_message_with_an_empty_user_is_ignored(streaming_bridge, user):
+    await streaming_bridge.send_event(
+        {"type": "message", "channel": "D0DM", "channel_type": "im", "user": user, "text": "hi"}
+    )
+
+    assert streaming_bridge.runs == []
+
+
+async def test_dm_with_empty_text_still_triggers(streaming_bridge):
+    await streaming_bridge.send_event(streaming_bridge.message("D0DM", "", channel_type="im"))
+
+    assert len(streaming_bridge.runs) == 1
+
+
+async def test_channel_message_without_a_text_field_is_ignored(streaming_bridge):
+    await streaming_bridge.send_event(
+        {"type": "message", "channel": "C0CHAN", "channel_type": "channel", "user": HUMAN}
+    )
+
+    assert streaming_bridge.runs == []
+
+
+# ============================================================================
+# The slack config entry survives config transformers
+# ============================================================================
+
+
+async def test_slack_entry_survives_a_transformer_that_builds_a_fresh_config(bridge):
+    @bridge.bot.transform_config
+    async def fresh(config, context):
+        return {"configurable": {"repo": "example/repo"}}
+
+    await bridge.send_event(bridge.message("D0DM", "hello", channel_type="im"))
+
+    configurable = bridge.runs[0].config["configurable"]
+    assert configurable["repo"] == "example/repo"
+    assert configurable["slack"]["requester_id"] == HUMAN
+
+
+async def test_slack_entry_survives_a_context_only_transformer(bridge):
+    @bridge.bot.transform_config
+    async def from_context(context):
+        return {"tags": [context.channel_id]}
+
+    await bridge.send_event(bridge.message("D0DM", "hello", channel_type="im"))
+
+    config = bridge.runs[0].config
+    assert config["tags"] == ["D0DM"]
+    assert config["configurable"]["slack"]["trigger_kind"] == "direct_message"

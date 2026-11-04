@@ -4,6 +4,7 @@ This module handles all configuration loading from environment variables
 with validation and type safety.
 """
 
+import dataclasses
 import logging
 from typing import Optional
 
@@ -11,7 +12,7 @@ from dotenv import find_dotenv
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .triggers import Provenance, Trigger
+from .triggers import AuthorType, Provenance, Trigger, TriggerKind
 
 logger = logging.getLogger(__name__)
 
@@ -138,13 +139,18 @@ class MessageContext:
         return self._thread_ts is not None
 
     @property
-    def trigger_kind(self) -> Optional[str]:
+    def provenance(self) -> Provenance:
+        """Who authored the trigger, and the requester's ID."""
+        return self._provenance
+
+    @property
+    def trigger_kind(self) -> Optional[TriggerKind]:
         """How the run was triggered: 'mention', 'direct_message', 'joined_thread',
         'shortcut' or 'edit'."""
         return self._trigger_kind
 
     @property
-    def author_type(self) -> str:
+    def author_type(self) -> AuthorType:
         """'human' or 'bot': who authored the trigger."""
         return self._provenance.author_type
 
@@ -169,6 +175,11 @@ class MessageContext:
         """The human who triggered the run, or None for bot triggers."""
         return self._provenance.requester_id
 
+    def provenance_fields(self) -> dict:
+        """The trigger kind and every provenance field, by name (the one place they're
+        listed: metadata and the run config are built from this)."""
+        return {"trigger_kind": self.trigger_kind, **dataclasses.asdict(self._provenance)}
+
     def slack_run_config(self) -> dict:
         """The ``configurable["slack"]`` entry of the run config: the trigger kind, its
         provenance, and the channel and thread identifiers.
@@ -178,12 +189,7 @@ class MessageContext:
         to: the thread if the trigger is a reply, otherwise the trigger message itself.
         """
         return {
-            "trigger_kind": self.trigger_kind,
-            "author_type": self.author_type,
-            "author_id": self.author_id,
-            "bot_id": self.bot_id,
-            "app_id": self.app_id,
-            "requester_id": self.requester_id,
+            **self.provenance_fields(),
             "channel_id": self.channel_id,
             "channel_type": self.channel_type,
             "message_ts": self.message_ts,

@@ -39,6 +39,7 @@ TEAM_ID = "T0TEAM"
 AGENT_USER_ID = "U0AGENT"
 AGENT_BOT_ID = "B0AGENT"
 AGENT_APP_ID = "A0AGENT"
+HUMAN_USER_ID = "U0HUMAN"
 
 
 # ============================================================================
@@ -196,7 +197,7 @@ class ThreadNotFound(Exception):
 
 class _FakeRuns:
     def __init__(self, deployment: "FakeLangGraphDeployment") -> None:
-        self._d = deployment
+        self._deployment = deployment
 
     def _record(self, thread_id, assistant_id, input, metadata, config, multitask_strategy):
         request = RunRequest(
@@ -207,8 +208,8 @@ class _FakeRuns:
             config=config,
             multitask_strategy=multitask_strategy,
         )
-        self._d.runs_started.append(request)
-        self._d.threads_by_id.setdefault(thread_id, {"thread_id": thread_id, "values": {}})
+        self._deployment.runs_started.append(request)
+        self._deployment.thread(thread_id)
         return request
 
     async def stream(
@@ -226,7 +227,7 @@ class _FakeRuns:
     ):
         request = self._record(thread_id, assistant_id, input, metadata, config, multitask_strategy)
         yield Chunk("metadata", {"run_id": request.run_id})
-        reply = self._d.reply_for(request)
+        reply = self._deployment.reply_for(request)
         if reply:
             yield Chunk("messages", ({"type": "AIMessageChunk", "content": reply}, {}))
 
@@ -246,30 +247,30 @@ class _FakeRuns:
         return {"run_id": request.run_id, "thread_id": thread_id}
 
     async def join(self, thread_id, run_id, **kwargs):
-        request = next(r for r in self._d.runs_started if r.run_id == run_id)
+        request = next(r for r in self._deployment.runs_started if r.run_id == run_id)
         return {
             "messages": [
                 *request.input["messages"],
-                {"type": "ai", "content": self._d.reply_for(request)},
+                {"type": "ai", "content": self._deployment.reply_for(request)},
             ]
         }
 
 
 class _FakeThreads:
     def __init__(self, deployment: "FakeLangGraphDeployment") -> None:
-        self._d = deployment
+        self._deployment = deployment
 
     async def get(self, thread_id, **kwargs):
-        if thread_id not in self._d.threads_by_id:
+        if thread_id not in self._deployment.threads_by_id:
             raise ThreadNotFound(thread_id)
-        return self._d.threads_by_id[thread_id]
+        return self._deployment.threads_by_id[thread_id]
 
     async def create(self, *, thread_id=None, if_exists=None, **kwargs):
         thread_id = thread_id or str(uuid.uuid4())
-        return self._d.threads_by_id.setdefault(thread_id, {"thread_id": thread_id, "values": {}})
+        return self._deployment.thread(thread_id)
 
     async def update_state(self, thread_id, values, **kwargs):
-        thread = self._d.threads_by_id.setdefault(thread_id, {"thread_id": thread_id, "values": {}})
+        thread = self._deployment.thread(thread_id)
         thread["values"].update(values)
         return {}
 
@@ -283,6 +284,10 @@ class FakeLangGraphDeployment:
         self.reply: str | Callable[[RunRequest], str] = "Hello from the agent"
         self.runs = _FakeRuns(self)
         self.threads = _FakeThreads(self)
+
+    def thread(self, thread_id: str) -> dict:
+        """The thread with this ID, created if it doesn't exist yet."""
+        return self.threads_by_id.setdefault(thread_id, {"thread_id": thread_id, "values": {}})
 
     def reply_for(self, request: RunRequest) -> str:
         return self.reply(request) if callable(self.reply) else self.reply
@@ -348,7 +353,13 @@ class BridgeHarness:
 
     def message(self, channel: str, text: str, **fields) -> dict:
         """Build a human message event (not yet delivered)."""
-        return {"type": "message", "channel": channel, "user": "U0HUMAN", "text": text, **fields}
+        return {
+            "type": "message",
+            "channel": channel,
+            "user": HUMAN_USER_ID,
+            "text": text,
+            **fields,
+        }
 
 
 async def drain(timeout: float = 5.0) -> None:
