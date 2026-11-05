@@ -281,7 +281,7 @@ class MessageHandler(BaseHandler):
                 )
                 plan_ts = response.get("ts")
                 if plan_ts:
-                    await self.state.save_tool_calls(plan_ts, calls)
+                    await self.state.save_tool_calls(channel_id, plan_ts, calls)
                     # Update with the View Details button (now we know plan_ts)
                     blocks_with_button = [plan_block, create_tool_details_button(plan_ts)]
                     await self.slack_client.client.chat_update(

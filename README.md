@@ -420,8 +420,22 @@ By default this lives in the deployment's **LangGraph store**, so it survives re
 redeploys and is shared between replicas; no extra infrastructure is needed on the Agent
 Server. If the store is unreachable at startup, or fails later, the bridge logs a warning
 and keeps new records in a bounded in-memory store, re-checking the store every few
-minutes. When it recovers, those records are copied to it with their remaining expiry, so
-feedback buttons and duplicate suppression keep working across the outage.
+minutes. When it recovers, those records are copied to it in the background with their
+remaining expiry, so feedback buttons and duplicate suppression keep working across the
+outage. A record the store rejects (an oversized value, say) is logged and dropped; it
+doesn't count as an outage.
+
+Bridge records rely on the store's TTLs to expire. If the store doesn't support TTLs, the
+bridge uses the bounded in-memory store instead, with a warning, rather than filling the
+LangGraph store with records that never expire. Enable store TTLs in your deployment config, or opt in to keeping records without
+expiry:
+
+```python
+from langgraph_sdk import get_client
+from langgraph2slack import LangGraphStateStore, SlackBot
+
+bot = SlackBot(state_store=LangGraphStateStore(get_client(), scope="my-bot", supports_ttl=False))
+```
 
 To use your own storage, pass any object with these three async methods:
 

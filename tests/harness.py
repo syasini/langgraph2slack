@@ -27,7 +27,7 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import urlencode
 
 import httpx
-from langgraph_sdk.errors import InternalServerError, NotFoundError
+from langgraph_sdk.errors import APIStatusError, InternalServerError, NotFoundError
 from slack_bolt.request.async_request import AsyncBoltRequest
 from slack_sdk.signature import SignatureVerifier
 from slack_sdk.web.async_client import AsyncWebClient
@@ -285,6 +285,12 @@ def server_error(message: str = "Internal Server Error") -> InternalServerError:
     return InternalServerError(message, response=httpx.Response(500, request=request), body=message)
 
 
+def client_error(status: int = 413, message: str = "Payload Too Large") -> APIStatusError:
+    """What the SDK raises when the store rejects one request (a 4xx)."""
+    request = httpx.Request("PUT", "http://fake/store/items")
+    return APIStatusError(message, response=httpx.Response(status, request=request), body=message)
+
+
 class _FakeStore:
     """The LangGraph store: namespaced items with TTLs in minutes, on a controllable clock.
 
@@ -293,6 +299,8 @@ class _FakeStore:
 
     - ``reachable = False``: every call fails with a connection error.
     - ``fail_next(error, times)``: the next calls fail with ``error``, then calls succeed.
+    - ``reject(key)``: writes of that key fail with a client error (an oversized value).
+    - ``hold(key)``: reads and writes of that key wait until the returned event is set.
     - ``supports_ttl = False``: writes with a TTL fail the way the server reports it, per
       ``ttl_error``: "loopback" (the store's NotImplementedError reaches the client) or
       "http" (a bare 500).
@@ -305,6 +313,19 @@ class _FakeStore:
         self.supports_ttl = True
         self.ttl_error = "loopback"
         self._failures: list[Exception] = []
+        self._rejected: dict[str, APIStatusError] = {}
+        self._held: dict[str, asyncio.Event] = {}
+
+    def reject(self, key: str, status: int = 413) -> None:
+        self._rejected[key] = client_error(status)
+
+    def hold(self, key: str) -> asyncio.Event:
+        self._held[key] = asyncio.Event()
+        return self._held[key]
+
+    async def _wait_if_held(self, key: str) -> None:
+        if key in self._held:
+            await self._held[key].wait()
 
     @property
     def now_seconds(self) -> float:
@@ -334,7 +355,10 @@ class _FakeStore:
         return item["expires_at"] is not None and self.now_minutes >= item["expires_at"]
 
     async def put_item(self, namespace, /, key, value, index=None, ttl=None, **kwargs):
+        await self._wait_if_held(key)
         self._check_reachable()
+        if key in self._rejected:
+            raise self._rejected[key]
         if ttl is not None and not self.supports_ttl:
             if self.ttl_error == "loopback":
                 raise NotImplementedError(
@@ -350,6 +374,7 @@ class _FakeStore:
         }
 
     async def get_item(self, namespace, /, key, *, refresh_ttl=None, **kwargs):
+        await self._wait_if_held(key)
         self._check_reachable()
         item = self.items.get((tuple(namespace), key))
         if item is None or self._expired(item):
@@ -468,7 +493,13 @@ class BridgeHarness:
         }
 
     async def click(
-        self, action_id: str, value: str, *, channel: str, message_ts: str, user: str = HUMAN_USER_ID
+        self,
+        action_id: str,
+        value: str,
+        *,
+        channel: str,
+        message_ts: str,
+        user: str = HUMAN_USER_ID,
     ) -> int:
         """Click a button on a Slack message."""
         return await self.send_interaction(

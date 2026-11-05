@@ -34,6 +34,12 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+# In-process dicts replaced by bridge state, with what to use instead
+_REMOVED_ATTRIBUTES = {
+    "message_run_mapping": "await bot.state.run_for_message(channel_id, message_ts)",
+    "tool_call_store": "await bot.state.tool_calls(channel_id, plan_ts)",
+}
+
 
 def _clean_blocks_for_retry(blocks: list, error_str: str) -> list:
     """Return a cleaned copy of blocks suitable for a retry after a known Slack API error.
@@ -364,6 +370,15 @@ class SlackBot:
             FastAPI app instance
         """
         return self._app
+
+    def __getattr__(self, name: str):
+        # Only reached when normal lookup fails
+        if name in _REMOVED_ATTRIBUTES:
+            raise AttributeError(
+                f"SlackBot.{name} was removed: the bridge's memory now lives in bot.state. "
+                f"Use {_REMOVED_ATTRIBUTES[name]} instead."
+            )
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def _create_background_task(self, coro) -> asyncio.Task:
         """Create a background task with automatic cleanup.
@@ -1314,8 +1329,11 @@ class SlackBot:
             try:
                 action = body.get("actions", [{}])[0]
                 plan_ts = action.get("value", "")
+                channel_id = (body.get("channel") or {}).get("id") or (
+                    body.get("container") or {}
+                ).get("channel_id", "")
 
-                tool_calls = await self.state.tool_calls(plan_ts)
+                tool_calls = await self.state.tool_calls(channel_id, plan_ts)
                 if not tool_calls:
                     logger.warning(f"No tool call data found for plan_ts={plan_ts}")
                     await client.views_open(
@@ -1414,14 +1432,16 @@ class SlackBot:
             thread_id: LangGraph thread ID
             run_id: LangGraph run ID
         """
-        await self.state.remember_run(context.channel_id, reply_ts, thread_id, run_id)
+        writes = [self.state.remember_run(context.channel_id, reply_ts, thread_id, run_id)]
+        # DMs always trigger, so only channel threads need remembering. The reply sits in the
+        # trigger's thread, or (when posted top-level) starts its own.
+        if not context.is_dm:
+            reply_thread_ts = context.thread_ts or (
+                context.message_ts if self.reply_in_thread else None
+            )
+            writes.append(self.state.mark_joined(context.channel_id, reply_thread_ts or reply_ts))
+        await asyncio.gather(*writes)
         logger.info(f"Stored feedback mapping: {context.channel_id}:{reply_ts} -> run_id={run_id}")
-
-        # The reply sits in the trigger's thread, or (when posted top-level) starts its own
-        reply_thread_ts = context.thread_ts or (
-            context.message_ts if self.reply_in_thread else None
-        )
-        await self.state.mark_joined(context.channel_id, reply_thread_ts or reply_ts)
 
     async def _lookup_run_id(self, channel_id: str, message_ts: str) -> Optional[str]:
         """Look up the run that produced a Slack message.

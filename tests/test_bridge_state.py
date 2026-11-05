@@ -4,16 +4,17 @@ suppression survive restarts, expire on their own, and degrade gracefully withou
 Restarts are simulated by building a second SlackBot against the same fake deployment.
 """
 
+import asyncio
 import logging
 
 import httpx
 import pytest
 
-from langgraph2slack import InMemoryStateStore
-from langgraph2slack.state import DeploymentStateStore
+from langgraph2slack import InMemoryStateStore, LangGraphStateStore
+from langgraph2slack.state import BridgeState, DeploymentStateStore
 from langgraph2slack.utils import TOOL_CALL_DETAILS_ACTION_ID
 
-from .harness import AGENT_USER_ID, server_error
+from .harness import AGENT_USER_ID, drain, server_error
 
 MENTION = f"<@{AGENT_USER_ID}>"
 
@@ -321,20 +322,32 @@ async def test_bridge_records_are_never_indexed(make_bridge, deployment):
 
 
 @pytest.mark.parametrize("ttl_error", ["loopback", "http"])
-async def test_store_without_ttl_support_is_used_without_expiry(
+async def test_store_without_ttl_support_is_not_filled_with_records_that_never_expire(
     make_bridge, deployment, caplog, ttl_error
 ):
     deployment.store.supports_ttl = False
     deployment.store.ttl_error = ttl_error
-    first = make_bridge(show_feedback_buttons=True)
+    bridge = make_bridge(show_feedback_buttons=True)
 
     with caplog.at_level(logging.WARNING):
-        reply_ts = await reply_to_dm(first)
+        reply_ts = await reply_to_dm(bridge)
+        await bridge.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
 
-    restarted = make_bridge(show_feedback_buttons=True)
-    await restarted.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
-    assert restarted.feedback_submitted[0]["run_id"] == first.runs[0].run_id
+    assert bridge.feedback_submitted[0]["run_id"] == bridge.runs[0].run_id
     assert any("doesn't support TTLs" in r.getMessage() for r in caplog.records)
+    assert deployment.store.items == {}
+
+
+async def test_store_without_ttl_support_can_be_used_explicitly(make_bridge, deployment):
+    deployment.store.supports_ttl = False
+    store = LangGraphStateStore(deployment, scope="my-bot", supports_ttl=False)
+    first = make_bridge(state_store=store, show_feedback_buttons=True)
+    reply_ts = await reply_to_dm(first)
+
+    restarted = make_bridge(state_store=store, show_feedback_buttons=True)
+    await restarted.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
+
+    assert restarted.feedback_submitted[0]["run_id"] == first.runs[0].run_id
     assert all(item["ttl"] is None for item in deployment.store.items.values())
 
 
@@ -351,6 +364,7 @@ async def test_unreachable_store_is_probed_again_later(deployment):
 
     now[0] = 301
     await store.put("ns", "k3", {"in": "store"})
+    await drain()
     # Records kept in memory during the outage were moved to the store on recovery
     assert deployment.store.namespace("ns")["k"]["value"] == {"in": "memory"}
     assert set(deployment.store.namespace("ns")) == {"k", "k2", "k3"}
@@ -394,6 +408,7 @@ async def test_recovery_keeps_records_the_store_already_has(deployment):
     deployment.store.reachable = True
     deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
     assert await store.get("ns", "new") == {"from": "outage"}
+    await drain()
 
     assert deployment.store.namespace("ns")["k"]["value"] == {"from": "before"}
     assert deployment.store.namespace("ns")["new"]["value"] == {"from": "outage"}
@@ -408,6 +423,7 @@ async def test_fallback_records_keep_their_remaining_expiry(deployment):
     deployment.store.reachable = True
     deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
     await store.get("ns", "short")
+    await drain()
 
     assert "gone" not in deployment.store.namespace("ns")
     assert deployment.store.namespace("ns")["short"]["ttl"] == 4  # 10 - 6 minutes left
@@ -474,3 +490,162 @@ async def test_transient_probe_failure_keeps_ttls(make_bridge, deployment, trans
     items = deployment.store.items.values()
     assert items
     assert all(item["ttl"] is not None for item in items)
+
+
+# ============================================================================
+# Second review: rejected records, recovery without stalls, per-key claims
+# ============================================================================
+
+
+async def test_a_record_the_store_rejects_is_dropped_without_failing_over(deployment, caplog):
+    store = DeploymentStateStore(deployment, clock=lambda: deployment.store.now_seconds)
+    deployment.store.reject("huge")
+
+    with pytest.raises(Exception):
+        await store.put("ns", "huge", {"output": "x" * 100})
+    await store.put("ns", "after", {})
+
+    assert "after" in deployment.store.namespace("ns")
+
+
+async def test_a_rejected_record_never_aborts_a_run_or_moves_state_to_memory(
+    make_bridge, deployment
+):
+    bridge = make_bridge(show_feedback_buttons=True)
+    deployment.store.reject("Ev9")
+
+    await bridge.send_event(bridge.message("D0DM", "hello", channel_type="im"), event_id="Ev9")
+
+    assert len(bridge.runs) == 1
+    assert deployment.store.namespace("feedback")  # later writes still reach the store
+
+
+async def test_a_rejected_outage_record_does_not_block_recovery(deployment):
+    store = DeploymentStateStore(deployment, clock=lambda: deployment.store.now_seconds)
+    deployment.store.reachable = False
+    await store.put("ns", "huge", {}, ttl=3600)
+    await store.put("ns", "ok", {}, ttl=3600)
+
+    deployment.store.reachable = True
+    deployment.store.reject("huge")
+    deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
+    await store.get("ns", "ok")
+    await drain()
+    await store.put("ns", "later", {})
+
+    assert set(deployment.store.namespace("ns")) == {"ok", "later"}
+    assert await store.get("ns", "huge") is None
+
+
+async def test_recovery_does_not_hold_up_new_records(deployment):
+    store = DeploymentStateStore(deployment, clock=lambda: deployment.store.now_seconds)
+    deployment.store.reachable = False
+    await store.put("ns", "old", {"from": "outage"}, ttl=3600)
+
+    deployment.store.reachable = True
+    deployment.store.advance(minutes=PROBE_INTERVAL_MINUTES)
+    copy_back = deployment.store.hold("old")
+    await asyncio.wait_for(store.put("ns", "new", {}), timeout=1)
+
+    assert "new" in deployment.store.namespace("ns")
+    copy_back.set()
+    await drain()
+    assert deployment.store.namespace("ns")["old"]["value"] == {"from": "outage"}
+
+
+async def test_a_hanging_store_probe_falls_back_to_memory(deployment):
+    store = DeploymentStateStore(
+        deployment, probe_timeout=0.05, clock=lambda: deployment.store.now_seconds
+    )
+    deployment.store.hold("reachable")
+
+    await asyncio.wait_for(store.put("ns", "k", {"v": 1}), timeout=1)
+
+    assert await store.get("ns", "k") == {"v": 1}
+    assert deployment.store.namespace("ns") == {}
+
+
+async def test_claims_for_different_events_do_not_wait_on_each_other(deployment):
+    state = BridgeState(LangGraphStateStore(deployment))
+    slow = deployment.store.hold("EvSlow")
+    first = asyncio.create_task(state.claim_trigger("EvSlow", "C0CHAN", "1.000001", "mention"))
+    await asyncio.sleep(0)
+
+    assert await asyncio.wait_for(
+        state.claim_trigger("EvFast", "C0CHAN", "1.000002", "mention"), timeout=1
+    )
+    slow.set()
+    assert await first
+
+
+async def test_concurrent_claims_of_one_event_start_one_run(deployment):
+    state = BridgeState(LangGraphStateStore(deployment))
+
+    claims = await asyncio.gather(
+        *(state.claim_trigger("Ev1", "C0CHAN", "1.000001", "mention") for _ in range(3))
+    )
+
+    assert sorted(claims) == [False, False, True]
+
+
+# ============================================================================
+# Second review: tool-call details and reply bookkeeping
+# ============================================================================
+
+
+async def test_tool_call_details_are_saved_before_the_button_appears(make_bridge, deployment):
+    deployment.reply = TOOL_CALL_REPLY
+    bridge = make_bridge(streaming=True, show_tool_calls=True)
+    saved_when_button_shown = []
+    handle = bridge.slack.handle
+
+    async def record(method, args):
+        if TOOL_CALL_DETAILS_ACTION_ID in str(args.get("blocks", "")):
+            saved_when_button_shown.append(bool(deployment.store.namespace("tool_calls")))
+        return await handle(method, args)
+
+    bridge.slack.handle = record
+    await reply_to_dm(bridge)
+
+    assert saved_when_button_shown == [True]
+
+
+async def test_no_tool_call_details_are_saved_without_the_button(
+    make_bridge, deployment, streaming
+):
+    deployment.reply = TOOL_CALL_REPLY
+    bridge = make_bridge(streaming=streaming, show_tool_calls=True, show_tool_call_details=False)
+
+    await reply_to_dm(bridge)
+
+    assert deployment.store.namespace("tool_calls") == {}
+
+
+async def test_tool_call_details_belong_to_their_channel(make_bridge, deployment):
+    deployment.reply = TOOL_CALL_REPLY
+    bridge = make_bridge(show_tool_calls=True)
+    await reply_to_dm(bridge)
+    (plan,) = [m for m in bridge.slack.calls_to("chat.postMessage") if "blocks" in m.args]
+    plan_ts = next(m["ts"] for m in bridge.agent_messages("D0DM") if m["text"] == plan.args["text"])
+
+    await bridge.click(TOOL_CALL_DETAILS_ACTION_ID, plan_ts, channel="C0OTHER", message_ts=plan_ts)
+
+    (opened,) = bridge.slack.calls_to("views.open")
+    assert "search_logs" not in str(opened.args["view"])
+
+
+async def test_dm_replies_record_no_joined_thread(make_bridge, deployment):
+    bridge = make_bridge(show_feedback_buttons=True)
+
+    await reply_to_dm(bridge)
+
+    assert deployment.store.namespace("feedback")
+    assert deployment.store.namespace("joined_conversations") == {}
+
+
+@pytest.mark.parametrize("name", ["message_run_mapping", "tool_call_store"])
+async def test_removed_attributes_point_to_bridge_state(make_bridge, name):
+    bridge = make_bridge()
+
+    with pytest.raises(AttributeError, match="bot.state"):
+        getattr(bridge.bot, name)

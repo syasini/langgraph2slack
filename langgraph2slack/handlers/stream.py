@@ -535,6 +535,8 @@ class StreamingHandler(BaseHandler):
             plan_block = create_plan_block(calls, self.show_tool_call_details, run_id, "Done")
             blocks = [plan_block]
             if self.show_tool_call_details:
+                # Saved before the button appears, so an early click finds the details
+                await self.state.save_tool_calls(channel_id, plan_ts, calls)
                 blocks.append(create_tool_details_button(plan_ts))
             await self.slack_client.client.chat_update(
                 channel=channel_id,
@@ -542,7 +544,6 @@ class StreamingHandler(BaseHandler):
                 text="Done",
                 blocks=blocks,
             )
-            await self.state.save_tool_calls(plan_ts, calls)
         except Exception as e:
             logger.warning(f"Failed to finalize plan block: {e}")
 
