@@ -117,10 +117,8 @@ class BackfillCollector:
                 )
             ]
 
-        normalized = [await self._normalizer.normalize(m) for m in earlier]
-        normalized = [m for m in normalized if m.text or m.files]
         parent_ts = conversation_ts if first_contact else None
-        return self._within_budget(normalized, keep_ts=parent_ts)
+        return await self._within_budget(earlier, keep_ts=parent_ts)
 
     async def advance(self, channel_id: str, conversation_ts: str, seen_ts: str) -> None:
         """Move the conversation's last-seen marker forward to ``seen_ts``."""
@@ -128,40 +126,60 @@ class BackfillCollector:
         if current is None or ts_key(seen_ts) > ts_key(current):
             await self._state.set_last_seen(channel_id, conversation_ts, seen_ts)
 
-    def _within_budget(
-        self, messages: list[NormalizedMessage], keep_ts: Optional[str] = None
+    async def _within_budget(
+        self, messages: list[dict], keep_ts: Optional[str] = None
     ) -> list[NormalizedMessage]:
-        """The most recent messages that fit both budgets, oldest first.
+        """The most recent messages that fit both budgets, normalized, oldest first.
 
         The message at ``keep_ts`` (the thread's parent) is kept first. A message too long
-        for the remaining budget is truncated to fit when enough room is left.
+        for the remaining budget is truncated to fit when enough room is left. Messages are
+        normalized newest first and only until the budget is spent, so files on messages
+        that won't fit are never downloaded.
         """
         kept: list[NormalizedMessage] = []
         remaining = self.max_chars
 
-        def take(message: NormalizedMessage) -> bool:
+        async def take(raw: dict) -> bool:
+            """Add a message if it fits; False once the budget is spent."""
             nonlocal remaining
             if len(kept) >= self.max_messages:
                 return False
-            cost = len(message.text) + len(message.display_name) + LINE_OVERHEAD
-            if cost > remaining:
-                room = remaining - len(message.display_name) - LINE_OVERHEAD
-                if room < MIN_TRUNCATED_CHARS:
+            message = await self._normalizer.normalize(raw, read_files=False)
+            if not (message.text or raw.get("files")):
+                return True  # nothing to show: skip it, keep going
+            overhead = len(message.display_name) + LINE_OVERHEAD
+            text_room = remaining - overhead
+            if text_room <= 0:
+                return False
+            if len(message.text) > text_room:
+                if text_room < MIN_TRUNCATED_CHARS:
                     return False
-                text = message.text[: room - len(TRUNCATION_MARK)] + TRUNCATION_MARK
-                message = dataclasses.replace(message, text=text)
-                cost = remaining
+                cut = text_room - len(TRUNCATION_MARK)
+                message = dataclasses.replace(message, text=message.text[:cut] + TRUNCATION_MARK)
+            # Files are read only now, with what's left of the budget: files that can't fit
+            # are listed by reference without being downloaded
+            files = await self._normalizer.read_files(
+                raw, budget_chars=text_room - len(message.text)
+            )
+            files_cost = sum(f.cost() for f in files)
+            if files_cost > text_room - len(message.text):
+                files = tuple(
+                    f.as_reference("not inlined: backfill budget") if f.is_inlined else f
+                    for f in files
+                )
+                files_cost = sum(f.cost() for f in files)
+            message = dataclasses.replace(message, files=files)
             kept.append(message)
-            remaining -= cost
+            remaining -= overhead + len(message.text) + files_cost
             return True
 
-        parent = next((m for m in messages if keep_ts and m.ts == keep_ts), None)
+        parent = next((m for m in messages if keep_ts and m.get("ts") == keep_ts), None)
         if parent is not None:
-            take(parent)
+            await take(parent)
         for message in reversed(messages):
             if message is parent:
                 continue
-            if not take(message):
+            if not await take(message):
                 break
         return sorted(kept, key=lambda m: ts_key(m.ts))
 
