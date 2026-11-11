@@ -7,6 +7,8 @@ Bolt exactly as the HTTP endpoint would, against two fakes:
   ``AsyncWebClient.api_call``, which the harness routes to the fake) and records them.
 - ``FakeLangGraphDeployment`` records run requests and implements the thread and store APIs.
 
+``FakeLangSmith`` stands in for the LangSmith client: tracing projects and feedback received.
+
 Payloads are signed with the test signing secret, so Bolt's request verification runs as it
 does in production.
 
@@ -22,12 +24,14 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable, Optional, Union
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 import httpx
 from langgraph_sdk.errors import APIStatusError, InternalServerError, NotFoundError
+from langsmith.utils import LangSmithConnectionError, LangSmithNotFoundError
 from slack_bolt.request.async_request import AsyncBoltRequest
 from slack_sdk.signature import SignatureVerifier
 from slack_sdk.web.async_client import AsyncWebClient
@@ -422,6 +426,42 @@ class FakeLangGraphDeployment:
 
 
 # ============================================================================
+# Fake LangSmith
+# ============================================================================
+
+
+class FakeLangSmith:
+    """Stands in for ``langsmith.Client``: tracing projects by name, and feedback received."""
+
+    def __init__(self) -> None:
+        self.projects: dict[str, str] = {"default": str(uuid.uuid4())}
+        self.project_lookups: list[str] = []
+        self.feedback: list[dict] = []
+        self._failing_lookups = 0
+
+    def add_project(self, name: str) -> str:
+        """Create a tracing project; returns its ID."""
+        self.projects[name] = str(uuid.uuid4())
+        return self.projects[name]
+
+    def fail_lookups(self, times: int = 1) -> None:
+        """Make the next ``times`` project lookups fail as if LangSmith were unreachable."""
+        self._failing_lookups += times
+
+    def read_project(self, *, project_name: str, **kwargs):
+        self.project_lookups.append(project_name)
+        if self._failing_lookups:
+            self._failing_lookups -= 1
+            raise LangSmithConnectionError("Connection error caused failure to GET /sessions")
+        if project_name not in self.projects:
+            raise LangSmithNotFoundError(f"Project {project_name} not found")
+        return SimpleNamespace(id=uuid.UUID(self.projects[project_name]), name=project_name)
+
+    def create_feedback(self, run_id=None, key="unnamed", **kwargs):
+        self.feedback.append({"run_id": run_id, "key": key, **kwargs})
+
+
+# ============================================================================
 # Bridge harness
 # ============================================================================
 
@@ -524,7 +564,7 @@ class BridgeHarness:
     @property
     def feedback_submitted(self) -> list[dict]:
         """Feedback the bridge sent to LangSmith (the client is faked)."""
-        return [c.kwargs for c in self.bot.langsmith_client.create_feedback.call_args_list]
+        return self.bot.langsmith_client.feedback
 
     def agent_messages(self, channel: str) -> list[dict]:
         """Messages the agent has posted in a channel."""
@@ -580,6 +620,7 @@ def route_slack_api(workspace: FakeSlackWorkspace):
 def build_bridge(
     slack: FakeSlackWorkspace,
     deployment: FakeLangGraphDeployment,
+    langsmith: Optional[FakeLangSmith] = None,
     **slackbot_kwargs,
 ) -> BridgeHarness:
     """Construct a SlackBot that talks to the fakes (Slack calls must be routed already)."""
@@ -590,7 +631,7 @@ def build_bridge(
     slackbot_kwargs.setdefault("slack_signing_secret", SIGNING_SECRET)
     with (
         patch("langgraph2slack.bot.get_client", return_value=deployment),
-        patch("langgraph2slack.bot.Client", MagicMock),
+        patch("langgraph2slack.bot.Client", return_value=langsmith or FakeLangSmith()),
     ):
         bot = SlackBot(**slackbot_kwargs)
     return BridgeHarness(bot, slack, deployment)
