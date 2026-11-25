@@ -39,7 +39,7 @@ async def test_human_dm_starts_a_run(bridge):
     await bridge.send_event(bridge.message("D0DM", "hello agent", channel_type="im"))
 
     assert len(bridge.runs) == 1
-    assert bridge.runs[0].text == "hello agent"
+    assert bridge.runs[0].request == "hello agent"
 
 
 @pytest.mark.parametrize(
@@ -53,8 +53,8 @@ async def test_channel_mention_starts_a_run_with_the_mention_stripped(streaming_
     )
 
     assert len(streaming_bridge.runs) == 1
-    assert MENTION not in streaming_bridge.runs[0].text
-    assert "help me" in streaming_bridge.runs[0].text
+    assert MENTION not in streaming_bridge.runs[0].request
+    assert "help me" in streaming_bridge.runs[0].request
 
 
 async def test_private_channel_mention_starts_a_run(streaming_bridge):
@@ -173,7 +173,7 @@ async def test_human_reply_in_joined_thread_triggers_without_mention(streaming_b
     )
 
     assert len(streaming_bridge.runs) == 1
-    assert streaming_bridge.runs[0].text == "follow-up"
+    assert streaming_bridge.runs[0].request == "follow-up"
 
 
 async def test_reply_in_thread_the_agent_has_not_joined_is_ignored(streaming_bridge):
@@ -224,7 +224,7 @@ async def test_failed_thread_history_lookup_falls_back_to_mention_rule(streaming
         )
     )
 
-    assert [r.text for r in streaming_bridge.runs] == ["hi"]
+    assert [r.request for r in streaming_bridge.runs] == ["hi"]
 
 
 # ============================================================================

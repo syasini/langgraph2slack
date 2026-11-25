@@ -91,7 +91,7 @@ async def test_app_bot_mention_starts_a_run_with_bot_provenance(make_bridge, str
     await bridge.send_event(app_bot_message(f"{MENTION} build 42 failed"))
 
     (run,) = bridge.runs
-    assert run.text == "build 42 failed"
+    assert run.request == "build 42 failed"
     assert run.slack_config["trigger_kind"] == "mention"
     assert run.slack_config["author_type"] == "bot"
     assert run.slack_config["author_id"] == "U0CIBOT"
@@ -109,7 +109,7 @@ async def test_classic_integration_mention_starts_a_run(make_bridge, streaming):
     await bridge.send_event(classic_bot_message(f"{MENTION} disk full on db-1"))
 
     (run,) = bridge.runs
-    assert run.text == "disk full on db-1"
+    assert run.request == "disk full on db-1"
     assert run.slack_config["author_type"] == "bot"
     assert run.slack_config["author_id"] is None
     assert run.slack_config["bot_id"] == "B0LEGACY"
@@ -161,7 +161,7 @@ async def test_bot_needs_a_mention_in_a_joined_thread(make_bridge):
     await bridge.send_event(app_bot_message("status: deploying", thread_ts=THREAD))
     await bridge.send_event(app_bot_message(f"{MENTION} status?", thread_ts=THREAD))
 
-    assert [r.text for r in bridge.runs] == ["status?"]
+    assert [r.request for r in bridge.runs] == ["status?"]
 
 
 async def test_bot_needs_a_mention_in_a_direct_message(make_bridge):
@@ -184,7 +184,7 @@ async def test_allowlisted_bot_can_converse_in_a_joined_thread_when_opted_in(mak
     await bridge.send_event(classic_bot_message("not allowlisted", thread_ts=THREAD))
 
     (run,) = bridge.runs
-    assert run.text == "what next?"
+    assert run.request == "what next?"
     assert run.slack_config["trigger_kind"] == "joined_thread"
 
 
@@ -209,7 +209,7 @@ async def test_edit_that_adds_a_mention_triggers(make_bridge, streaming):
     await bridge.send_event(edit(f"{MENTION} can you look at this?", "can you look at this?"))
 
     (run,) = bridge.runs
-    assert run.text == "can you look at this?"
+    assert run.request == "can you look at this?"
     assert run.slack_config["trigger_kind"] == "edit"
     assert run.slack_config["message_ts"] == "1600000000.000005"
     assert run.slack_config["requester_id"] == HUMAN
@@ -236,7 +236,7 @@ async def test_editing_a_message_that_already_triggered_is_ignored(make_bridge):
 
     await bridge.send_event(edit(f"{MENTION} hello", f"{MENTION} helo"))
 
-    assert [r.text for r in bridge.runs] == ["helo"]
+    assert [r.request for r in bridge.runs] == ["helo"]
 
 
 async def test_editing_a_joined_thread_message_that_already_triggered_is_ignored(make_bridge):
@@ -252,7 +252,7 @@ async def test_editing_a_joined_thread_message_that_already_triggered_is_ignored
 
     await bridge.send_event(event)
 
-    assert [r.text for r in bridge.runs] == ["follow up"]
+    assert [r.request for r in bridge.runs] == ["follow up"]
 
 
 @pytest.mark.parametrize(
