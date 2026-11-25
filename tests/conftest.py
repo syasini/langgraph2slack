@@ -76,7 +76,10 @@ def make_bridge(slack, deployment, langsmith, monkeypatch):
         get_tracer_project.cache_clear()
         return build_bridge(slack, deployment, langsmith, **slackbot_kwargs)
 
-    return factory
+    yield factory
+    # ...and don't leave a test's project in the cache for tests that build bots directly
+    get_env_var.cache_clear()
+    get_tracer_project.cache_clear()
 
 
 # ============================================================================
@@ -98,7 +101,7 @@ def sample_dm_event():
         "channel": "D789DM",
         "channel_type": "im",
         "text": "hello bot",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -116,7 +119,7 @@ def sample_channel_event():
         "channel": "C123CHANNEL",
         "channel_type": "channel",
         "text": "<@U123BOT> hello",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -135,7 +138,7 @@ def sample_thread_event():
         "channel_type": "channel",
         "text": "reply in thread",
         "ts": "1234567.999",
-        "thread_ts": "1234567.890"  # Parent message timestamp
+        "thread_ts": "1234567.890",  # Parent message timestamp
     }
 
 
@@ -153,7 +156,7 @@ def sample_group_event():
         "channel": "G789GROUP",
         "channel_type": "group",
         "text": "hello team",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -288,7 +291,7 @@ def valid_env_vars(monkeypatch):
         "SLACK_BOT_TOKEN": "xoxb-test-token-123",
         "SLACK_SIGNING_SECRET": "test-signing-secret-456",
         "ASSISTANT_ID": "test-assistant",
-        "LANGGRAPH_URL": "http://localhost:8123"
+        "LANGGRAPH_URL": "http://localhost:8123",
     }
 
     # Set all env vars

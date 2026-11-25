@@ -441,6 +441,7 @@ class FakeLangSmith:
         self.project_lookups: list[str] = []
         self.feedback: list[dict] = []
         self._failing_lookups = 0
+        self.rejects_projects = False
 
     def add_project(self, name: str) -> str:
         """Create a tracing project; returns its ID."""
@@ -461,6 +462,10 @@ class FakeLangSmith:
         return SimpleNamespace(id=uuid.UUID(self.projects[project_name]), name=project_name)
 
     def create_feedback(self, run_id=None, key="unnamed", **kwargs):
+        """Records feedback. With ``rejects_projects``, feedback naming a project fails, as
+        when the run was traced to a different one."""
+        if self.rejects_projects and kwargs.get("session_id") is not None:
+            raise LangSmithNotFoundError("Run not found in project")
         self.feedback.append({"run_id": run_id, "key": key, **kwargs})
 
 

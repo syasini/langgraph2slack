@@ -97,3 +97,28 @@ async def test_a_failed_project_lookup_is_retried_on_the_next_click(make_bridge,
         None,
         langsmith.projects["default"],
     ]
+
+
+async def test_a_missing_project_is_not_looked_up_on_every_click(make_bridge, langsmith):
+    bridge = make_bridge(show_feedback_buttons=True, langsmith_project="no-such-project")
+    reply_ts = await reply_to_dm(bridge)
+
+    await bridge.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
+    await bridge.click("feedback", "negative", channel="D0DM", message_ts=reply_ts)
+
+    assert langsmith.project_lookups == ["no-such-project"]
+    assert len(bridge.feedback_submitted) == 2
+
+
+async def test_feedback_rejected_for_its_project_is_sent_without_one(
+    make_bridge, langsmith, caplog
+):
+    langsmith.rejects_projects = True
+    bridge = make_bridge(show_feedback_buttons=True)
+    reply_ts = await reply_to_dm(bridge)
+
+    with caplog.at_level(logging.WARNING, logger="langgraph2slack.bot"):
+        await bridge.click("feedback", "positive", channel="D0DM", message_ts=reply_ts)
+
+    assert [f["session_id"] for f in bridge.feedback_submitted] == [None]
+    assert "langsmith_project" in caplog.text

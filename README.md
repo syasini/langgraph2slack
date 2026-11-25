@@ -242,7 +242,7 @@ bot = SlackBot(
     enable_feedback_comments=False,     # Allow text feedback on negative reactions (default: False)
     show_thread_id=False,               # Show LangGraph thread_id in footer (default: False)
     langsmith_project=None,             # LangSmith project feedback is filed in
-                                        # (default: env LANGSMITH_PROJECT, else "default")
+                                        # (default: the SDK's tracing project, else "default")
 
     # Image handling
     extract_images=True,                # Convert markdown images to Slack blocks (default: True)
@@ -448,9 +448,12 @@ bot = SlackBot(
 ```
 
 Feedback is filed in the LangSmith project your agent's runs are traced to. The bridge finds
-it the same way the LangGraph server does (`LANGSMITH_PROJECT`, else `"default"`), so there is
-usually nothing to set. If the bridge runs apart from the agent (`langgraph_url` set) and its
-environment names a different project, pass `langsmith_project="your-project"`.
+it the way the LangSmith SDK picks a tracing project in the bridge's environment
+(`LANGSMITH_PROJECT` or `LANGCHAIN_PROJECT`, or the project LangGraph Platform sets; else
+`"default"`). When the bridge runs inside the agent's deployment that's the agent's own project,
+so there is nothing to set. If the bridge runs apart from the agent (`langgraph_url` set), pass
+`langsmith_project="your-project"`. If LangSmith rejects feedback for the project, the bridge
+logs a warning and sends it without one.
 
 ### Bridge State
 
