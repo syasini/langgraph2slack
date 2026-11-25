@@ -7,11 +7,14 @@ sets up Slack handlers, and coordinates between Slack and LangGraph.
 import asyncio
 import json
 import logging
+import threading
+import time
 from typing import Callable, Optional
 
 from fastapi import FastAPI, Request
 from langgraph_sdk import get_client
 from langsmith import Client
+from langsmith.utils import LangSmithNotFoundError, get_tracer_project
 from pydantic import SecretStr
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.async_app import AsyncApp
@@ -142,6 +145,7 @@ class SlackBot:
         allow_bot_triggers: bool = False,
         bot_trigger_allowlist: Optional[list[str]] = None,
         allowlisted_bots_in_joined_threads: bool = False,
+        langsmith_project: Optional[str] = None,
     ):
         """Initialize SlackBot.
 
@@ -237,6 +241,11 @@ class SlackBot:
             allowlisted_bots_in_joined_threads: Let allowlisted bots trigger the agent in
                 threads it has joined without mentioning it, e.g. a trusted companion agent
                 (default: False; bots must always mention the agent). Requires an allowlist.
+            langsmith_project: Name of the LangSmith project the agent's runs are traced to;
+                feedback is filed there. Default: the project the LangSmith SDK traces to in
+                the bridge's environment (LANGSMITH_PROJECT or LANGCHAIN_PROJECT, or the one
+                LangGraph Platform sets; else "default"). Set it whenever the bridge runs apart
+                from the agent (langgraph_url set): its environment may name another project.
         """
         logger.info("Initializing SlackBot...")
 
@@ -286,8 +295,14 @@ class SlackBot:
         self._metadata_transformers = DictTransformerChain()
         self._config_transformers = DictTransformerChain()
 
-        # Initialize LangSmith client for feedback
+        # Initialize LangSmith client for feedback. Feedback names the project its run is
+        # traced to, found the way the LangGraph server picks it; the ID is looked up once.
         self.langsmith_client = Client()
+        self.langsmith_project = langsmith_project or get_tracer_project()
+        self._langsmith_project_id: Optional[str] = None
+        # A project that doesn't exist isn't looked up again until this time (monotonic)
+        self._langsmith_project_missing_until = 0.0
+        self._langsmith_project_lock = threading.Lock()
 
         # Initialize LangGraph client
         self.langgraph_client = get_client(url=self.config.LANGGRAPH_URL)
@@ -1502,15 +1517,61 @@ class SlackBot:
         """
         logger.info(f"Submitting feedback to LangSmith: run_id={run_id}, score={score}")
 
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.langsmith_client.create_feedback(
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._send_feedback, run_id, score, comment)
+        logger.info(f"Feedback submitted successfully for run {run_id}")
+
+    def _send_feedback(self, run_id: str, score: float, comment: Optional[str]) -> None:
+        """Send feedback naming the agent's project. If LangSmith rejects that (the run was
+        traced to another project, say), send it once more without one, as before."""
+        session_id = self._find_langsmith_project_id()
+
+        def send(session_id):
+            self.langsmith_client.create_feedback(
                 run_id=run_id,
                 key="user_feedback",
                 score=score,
                 comment=comment,
-            ),
-        )
+                session_id=session_id,
+            )
 
-        logger.info(f"Feedback submitted successfully for run {run_id}")
+        if session_id is None:
+            send(None)
+            return
+        try:
+            send(session_id)
+        except Exception as e:
+            logger.warning(
+                f"LangSmith rejected feedback for project {self.langsmith_project!r} ({e}); "
+                f"sending it without a project. If the agent traces to another project, set "
+                f"langsmith_project."
+            )
+            send(None)
+
+    def _find_langsmith_project_id(self) -> Optional[str]:
+        """Look up the ID of the LangSmith project the agent's runs are traced to.
+
+        LangSmith requires feedback to name its run's project (from 2027-01-31 on Cloud).
+        The ID is remembered once found, and looked up by one submission at a time. If the
+        lookup fails, feedback is sent without it, as before: after an error the next
+        submission tries again; a project that doesn't exist is retried after 10 minutes.
+
+        Returns:
+            Project ID, or None if it could not be found
+        """
+        with self._langsmith_project_lock:
+            if self._langsmith_project_id is not None:
+                return self._langsmith_project_id
+            if time.monotonic() < self._langsmith_project_missing_until:
+                return None
+            try:
+                project = self.langsmith_client.read_project(project_name=self.langsmith_project)
+                self._langsmith_project_id = str(project.id)
+            except Exception as e:
+                if isinstance(e, LangSmithNotFoundError):
+                    self._langsmith_project_missing_until = time.monotonic() + 600
+                logger.warning(
+                    f"Could not find LangSmith project {self.langsmith_project!r}; "
+                    f"sending feedback without it: {e}"
+                )
+            return self._langsmith_project_id

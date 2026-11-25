@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refreshed `uv.lock` to the latest releases (`langgraph-sdk` 0.4.10, `langsmith` 0.14.14, `slack-bolt` 1.30.0, `slack-sdk` 3.45.0); the full test suite passes unchanged. Declared minimum versions are unchanged.
 - `examples/plant_bot` now targets the latest LangGraph stack (`langgraph` 1.2.18, `langgraph-api` 0.16.9, `langchain` 1.4.7) and requires Python ≥ 3.11 (required by `langgraph-api`).
 - The run config is now always a dict carrying `configurable["slack"]` (see Added), even with no config transformers registered; previously it was `None` in that case. Config transformers now receive this pre-filled config instead of `{}`; if one returns a config without the entry (a fresh dict, or a transformer that only takes the context), the entry is put back.
+- Minimum `langsmith` is now 0.10.15 (was 0.1.0), the first release that lets feedback name its run's project.
 
 ### Added
 - `deepagents` in the `dev` extra (Python ≥ 3.11) for tests against real deep-agent payload shapes. It is not a runtime dependency.
@@ -24,8 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Duplicate suppression:** a redelivered Slack event (same event ID, or same message and trigger kind) starts no second run, including on another replica or after a restart (best-effort). Only redeliveries of the same event wait on each other.
 - **Joined threads are remembered:** after the agent posts in a thread, replies there are recognized from bridge state instead of reading Slack's thread history on every message.
 - Test harness with a fake Slack workspace and a fake LangGraph deployment: tests deliver raw, signed Slack payloads through Bolt and assert on the runs started and the Slack calls made.
+- `langsmith_project` SlackBot parameter: the LangSmith project feedback is filed in. Defaults to the LangSmith SDK's tracing project in the bridge's environment (`LANGSMITH_PROJECT` or `LANGCHAIN_PROJECT`, or the one LangGraph Platform sets; else `"default"`), which inside the agent's deployment is the agent's own; set it whenever the bridge runs apart from the agent. A project that doesn't exist is looked up again after 10 minutes, not on every click, and feedback LangSmith rejects for the project is sent once more without one.
 
 ### Fixed
+- Feedback buttons now tell LangSmith which project the run belongs to. LangSmith is making this required: without it, feedback is rejected on SmithDB-only workspaces today and everywhere on LangSmith Cloud from 2027-01-31, and recent SDKs warn on every click. The project ID is looked up once; if the lookup fails, feedback is sent without it as before (with a warning) and the next click retries.
 - Message subtypes that can't carry a trigger (`channel_join`, `channel_topic`, `message_deleted`, `me_message`, ...) no longer start a run, for example when a join notice mentions the agent. Only plain messages, `bot_message`, `file_share` and `thread_broadcast` are considered (bot-authored messages trigger only when bot triggers are enabled).
 - `pytest.ini` used a `[tool:pytest]` header, which pytest ignores in that file, so its settings (including `asyncio_mode = auto`) never applied; it now uses `[pytest]`.
 - `examples/plant_bot` installs `langgraph2slack` from the repo root via `[tool.uv.sources]` instead of a machine-specific absolute path.

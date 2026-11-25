@@ -5,6 +5,7 @@ Fixtures are automatically discovered by pytest and available to all test files.
 """
 
 import pytest
+from langsmith.utils import get_env_var, get_tracer_project
 
 from langgraph2slack import SlackBot
 from langgraph2slack.config import MessageContext
@@ -14,10 +15,20 @@ from .harness import (
     BOT_TOKEN,
     SIGNING_SECRET,
     FakeLangGraphDeployment,
+    FakeLangSmith,
     FakeSlackWorkspace,
     build_bridge,
     route_slack_api,
 )
+
+# Env vars the LangSmith SDK reads to pick the tracing project
+TRACING_PROJECT_ENV_VARS = [
+    "HOSTED_LANGSERVE_PROJECT_NAME",
+    "LANGSMITH_PROJECT",
+    "LANGCHAIN_PROJECT",
+    "LANGSMITH_SESSION",
+    "LANGCHAIN_SESSION",
+]
 
 # ============================================================================
 # Bridge harness (fake Slack workspace + fake LangGraph deployment)
@@ -40,21 +51,35 @@ def deployment():
 
 
 @pytest.fixture
-def make_bridge(slack, deployment, monkeypatch):
+def langsmith():
+    """A fake LangSmith: tracing projects, and the feedback the bridge sends."""
+    return FakeLangSmith()
+
+
+@pytest.fixture
+def make_bridge(slack, deployment, langsmith, monkeypatch):
     """Factory: build a SlackBot against the shared fakes. Call twice to simulate a restart."""
     monkeypatch.setenv("SLACK_BOT_TOKEN", BOT_TOKEN)
     monkeypatch.setenv("SLACK_SIGNING_SECRET", SIGNING_SECRET)
     monkeypatch.setenv("ASSISTANT_ID", ASSISTANT_ID)
     monkeypatch.delenv("LANGGRAPH_URL", raising=False)
     monkeypatch.delenv("MULTITASK_STRATEGY", raising=False)
+    for name in TRACING_PROJECT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
     # One clock for the deployment and the bridge: advancing the fake store's clock also
     # moves the bridge's fallback expiry and store re-probe schedule.
     monkeypatch.setattr("langgraph2slack.state._now", lambda: deployment.store.now_seconds)
 
     def factory(**slackbot_kwargs):
-        return build_bridge(slack, deployment, **slackbot_kwargs)
+        # The LangSmith SDK caches env lookups; tests set the tracing project per bridge
+        get_env_var.cache_clear()
+        get_tracer_project.cache_clear()
+        return build_bridge(slack, deployment, langsmith, **slackbot_kwargs)
 
-    return factory
+    yield factory
+    # ...and don't leave a test's project in the cache for tests that build bots directly
+    get_env_var.cache_clear()
+    get_tracer_project.cache_clear()
 
 
 # ============================================================================
@@ -76,7 +101,7 @@ def sample_dm_event():
         "channel": "D789DM",
         "channel_type": "im",
         "text": "hello bot",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -94,7 +119,7 @@ def sample_channel_event():
         "channel": "C123CHANNEL",
         "channel_type": "channel",
         "text": "<@U123BOT> hello",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -113,7 +138,7 @@ def sample_thread_event():
         "channel_type": "channel",
         "text": "reply in thread",
         "ts": "1234567.999",
-        "thread_ts": "1234567.890"  # Parent message timestamp
+        "thread_ts": "1234567.890",  # Parent message timestamp
     }
 
 
@@ -131,7 +156,7 @@ def sample_group_event():
         "channel": "G789GROUP",
         "channel_type": "group",
         "text": "hello team",
-        "ts": "1234567.890"
+        "ts": "1234567.890",
     }
 
 
@@ -266,7 +291,7 @@ def valid_env_vars(monkeypatch):
         "SLACK_BOT_TOKEN": "xoxb-test-token-123",
         "SLACK_SIGNING_SECRET": "test-signing-secret-456",
         "ASSISTANT_ID": "test-assistant",
-        "LANGGRAPH_URL": "http://localhost:8123"
+        "LANGGRAPH_URL": "http://localhost:8123",
     }
 
     # Set all env vars
