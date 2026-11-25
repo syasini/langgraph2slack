@@ -19,6 +19,7 @@ Example:
 from .block_transformers import render_blocks, render_code_blocks, render_tables, render_todo_lists
 from .bot import SlackBot
 from .config import BotConfig, MessageContext
+from .files import FilePart
 from .framing import RequestedBy, TriggerInput
 from .normalizer import NormalizedMessage
 from .state import InMemoryStateStore, LangGraphStateStore, StateStore
@@ -40,6 +41,7 @@ __all__ = [
     "TriggerInput",
     "RequestedBy",
     "NormalizedMessage",
+    "FilePart",
     "StateStore",
     "InMemoryStateStore",
     "LangGraphStateStore",

@@ -4,6 +4,9 @@ This module provides reusable fixtures for testing langgraph2slack components.
 Fixtures are automatically discovered by pytest and available to all test files.
 """
 
+from unittest.mock import patch
+
+import httpx
 import pytest
 from langsmith.utils import get_env_var, get_tracer_project
 
@@ -40,7 +43,13 @@ def slack():
     """A fake Slack workspace; every Slack Web API call is routed to it for the test."""
     workspace = FakeSlackWorkspace()
     patcher = route_slack_api(workspace)
-    yield workspace
+    # Private file downloads go to the workspace too, over a mock HTTP transport
+    transport = httpx.MockTransport(workspace.serve_file)
+    with patch(
+        "langgraph2slack.files._new_client",
+        lambda: httpx.AsyncClient(transport=transport, follow_redirects=True),
+    ):
+        yield workspace
     patcher.stop()
 
 
