@@ -1,8 +1,10 @@
 """Bot triggers (ADR-0007) and edit triggers, tested through the bridge's public seam."""
 
+import asyncio
+
 import pytest
 
-from .harness import AGENT_BOT_ID, AGENT_USER_ID, TEAM_ID
+from .harness import AGENT_BOT_ID, AGENT_USER_ID, TEAM_ID, drain
 
 MENTION = f"<@{AGENT_USER_ID}>"
 HUMAN = "U0HUMAN"
@@ -124,13 +126,13 @@ async def test_classic_integration_reply_streams_to_the_bridge_itself(make_bridg
     assert start.args["recipient_team_id"] == TEAM_ID
 
 
-async def test_app_bot_reply_streams_to_the_bot_user(make_bridge):
+async def test_app_bot_reply_streams_to_the_bridge_itself(make_bridge):
     bridge = make_bridge(streaming=True, allow_bot_triggers=True)
 
     await bridge.send_event(app_bot_message(f"{MENTION} build failed"))
 
     (start,) = bridge.slack.calls_to("chat.startStream")
-    assert start.args["recipient_user_id"] == "U0CIBOT"
+    assert start.args["recipient_user_id"] == AGENT_USER_ID
 
 
 @pytest.mark.parametrize("allowlist", [["B0CI"], ["A0CI"]], ids=["bot-id", "app-id"])
@@ -307,19 +309,52 @@ async def test_edits_of_unhandled_subtypes_are_ignored(make_bridge):
     assert bridge.runs == []
 
 
-async def test_edit_can_retrigger_a_message_whose_run_was_never_created(make_bridge, deployment):
-    bridge = make_bridge(streaming=False)
-    create = deployment.runs.create
-
-    async def fail_once(*args, **kwargs):
-        deployment.runs.create = create
-        raise RuntimeError("deployment unavailable")
-
-    deployment.runs.create = fail_once
-    await bridge.send_event(
-        bridge.message("C0CHAN", f"{MENTION} helo", channel_type="channel", ts="1600000000.000005")
+def joined_thread_reply(bridge, text="follow up"):
+    return bridge.message(
+        "C0CHAN", text, channel_type="channel", ts="1600000000.000005", thread_ts=THREAD
     )
 
-    await bridge.send_event(edit(f"{MENTION} hello", "hello"))
 
-    assert [r.text for r in bridge.runs] == ["hello"]
+def mention_added(text="follow up"):
+    event = edit(f"{MENTION} {text}", text)
+    event["message"]["thread_ts"] = THREAD
+    return event
+
+
+async def test_an_edit_after_a_failed_reply_starts_no_second_run(make_bridge):
+    bridge = make_bridge(streaming=False)
+    joined_thread(bridge.slack)
+    bridge.slack.fail("chat.postMessage")
+    await bridge.send_event(joined_thread_reply(bridge))
+    del bridge.slack.failing_methods["chat.postMessage"]
+
+    await bridge.send_event(mention_added())
+
+    assert len(bridge.runs) == 1
+
+
+async def test_a_post_and_its_quick_edit_start_one_run(make_bridge, deployment):
+    bridge = make_bridge()
+    joined_thread(bridge.slack)
+    # The post's duplicate check waits on the store while the edit arrives
+    slow_store = deployment.store.hold("EvPost")
+    await bridge.send_event(joined_thread_reply(bridge), event_id="EvPost", wait=False)
+    await asyncio.sleep(0.05)
+    await bridge.send_event(mention_added(), event_id="EvEdit", wait=False)
+    await asyncio.sleep(0.05)
+
+    slow_store.set()
+    await drain()
+
+    assert len(bridge.runs) == 1
+
+
+async def test_edits_do_not_trigger_while_the_store_is_unreachable(make_bridge, deployment):
+    bridge = make_bridge()
+    joined_thread(bridge.slack)
+    await bridge.send_event(joined_thread_reply(bridge))
+
+    deployment.store.reachable = False
+    await bridge.send_event(mention_added())
+
+    assert len(bridge.runs) == 1

@@ -1044,8 +1044,7 @@ class SlackBot:
                         message_text,
                         context,
                         bot_reactions=self.reactions,  # Pass reactions for bot message handling
-                        # Classic integrations have no user: stream to the bridge's own bot user
-                        recipient_user_id=context.user_id or self._bot_user_id,
+                        bridge_user_id=self._bot_user_id,
                     )
 
                     # Add user-complete reactions after streaming completes (parallel)
@@ -1234,11 +1233,6 @@ class SlackBot:
                             )
 
                     success = True
-
-            except Exception:
-                # The run never completed: let a corrective edit of this message trigger again
-                await self.state.unmark_started(context.channel_id, context.message_ts)
-                raise
 
             finally:
                 # Only remove non-persistent user reactions on success

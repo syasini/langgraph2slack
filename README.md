@@ -343,15 +343,22 @@ bot = SlackBot(
 - `allowlisted_bots_in_joined_threads=True` relaxes that for allowlisted bots only, for
   example a trusted companion agent. It requires `bot_trigger_allowlist`.
 - Classic integrations (no user) and modern Slack apps are both recognized as bots. The
-  agent never triggers on its own messages.
+  agent never triggers on its own messages. A bot-triggered reply streams to the bridge's
+  own bot user, since there's no human to stream it to.
 - Bot-triggered runs carry `author_type: "bot"` and no `requester_id` in their provenance
   (see below). Restricting what the agent does on bot-triggered runs is up to your agent.
+- **Watch for loops between agents.** If another agent is allowed to trigger this one and
+  each @-mentions the other in its replies, they keep triggering each other. The bridge
+  doesn't break such loops: keep the allowlist tight, and have your agent avoid mentioning
+  bots, or stop replying to them, based on `author_type`.
 
 ### Edited Messages
 
 Editing a message to add an @-mention of the agent triggers it like a new message, with
 trigger kind `edit`. Edits to a message that already started a run (fixing a typo, say) are
-ignored, and edits follow the same bot rules as new messages.
+ignored, even if that run failed (repost the message to try again), and edits follow the same
+bot rules as new messages. While the bridge state store is unreachable, edits don't trigger,
+since the bridge can't tell whether the message already started a run.
 
 ### Provenance in the Run Config
 

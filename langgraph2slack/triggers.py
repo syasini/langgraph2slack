@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
 
-from .state import BridgeState
+from .state import BridgeState, KeyedLocks
 from .utils import is_bot_mention, is_dm
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,9 @@ class TriggerGate:
         self._get_identity = get_identity
         self._state = state
         self._bots = bot_policy
+        # Events about the same message (a post and its edit) are evaluated one at a time,
+        # so an edit sees whether the post already started a run
+        self._message_locks = KeyedLocks()
 
     async def evaluate(self, event: dict, event_id: Optional[str] = None) -> Optional[Trigger]:
         """Return the trigger for ``event``, or None if it should not start a run.
@@ -140,22 +143,28 @@ class TriggerGate:
         A trigger is claimed in bridge state as it's recognized, so a redelivery of the same
         event (same ``event_id``, or same message and trigger kind) returns None. The message
         is also recorded as having started a run, which the edit rule checks.
-        """
-        if event.get("subtype") == EDIT_SUBTYPE:
-            trigger = await self._classify_edit(event)
-        elif event.get("subtype") in TRIGGER_SUBTYPES:
-            trigger = await self._classify_message(event)
-        else:
-            trigger = None
-        if trigger is None:
-            return None
 
-        channel_id, message_ts = trigger.message.get("channel"), trigger.message.get("ts")
-        if not await self._state.claim_trigger(event_id, channel_id, message_ts, trigger.kind):
-            logger.info(f"Ignoring duplicate delivery of {event_id or message_ts}")
-            return None
-        await self._state.mark_started(channel_id, message_ts)
-        return trigger
+        Within this process, events about the same message are evaluated one at a time. Across
+        replicas a post and a near-simultaneous edit can still both trigger (best effort, like
+        duplicate suppression).
+        """
+        is_edit = event.get("subtype") == EDIT_SUBTYPE
+        message_ts = (event.get("message") or {}).get("ts") if is_edit else event.get("ts")
+        async with self._message_locks.hold(f"{event.get('channel')}:{message_ts}"):
+            if is_edit:
+                trigger = await self._classify_edit(event)
+            elif event.get("subtype") in TRIGGER_SUBTYPES:
+                trigger = await self._classify_message(event)
+            else:
+                trigger = None
+            if trigger is None:
+                return None
+
+            channel_id, message_ts = trigger.message.get("channel"), trigger.message.get("ts")
+            if not await self._state.claim_trigger(event_id, channel_id, message_ts, trigger.kind):
+                logger.info(f"Ignoring duplicate delivery of {event_id or message_ts}")
+                return None
+            return trigger
 
     async def _admit_author(self, message: dict, identity: BridgeIdentity) -> Optional[Provenance]:
         """The message author's provenance if they may trigger the agent at all, else None.

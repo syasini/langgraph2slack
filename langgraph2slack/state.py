@@ -16,12 +16,13 @@ with keys or expiry.
 """
 
 import asyncio
+import contextlib
 import logging
 import math
 import time
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Callable, Optional, Protocol
+from typing import AsyncIterator, Callable, Optional, Protocol
 
 from .tool_calls import ActiveToolCall
 
@@ -33,6 +34,34 @@ DAY = 24 * 60 * 60
 def _now() -> float:
     """The clock bridge state uses for expiry and probe scheduling (seconds)."""
     return time.monotonic()
+
+
+class StateUnavailable(Exception):
+    """A record may exist in a store that can't be reached right now, so a miss proves
+    nothing."""
+
+
+class KeyedLocks:
+    """One asyncio lock per key, created on first use and dropped once nobody holds or
+    waits for it. Serializes work on the same key within this process only."""
+
+    def __init__(self) -> None:
+        # key -> (lock, number of tasks holding or waiting for it)
+        self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
+
+    @contextlib.asynccontextmanager
+    async def hold(self, key: str) -> AsyncIterator[None]:
+        lock, holders = self._locks.get(key, (asyncio.Lock(), 0))
+        self._locks[key] = (lock, holders + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, holders = self._locks[key]
+            if holders == 1:
+                del self._locks[key]
+            else:
+                self._locks[key] = (lock, holders - 1)
 
 
 class StateStore(Protocol):
@@ -177,7 +206,9 @@ class DeploymentStateStore:
       proves it's missing; transient probe failures never decide it. To keep records in such
       a store anyway, pass ``LangGraphStateStore(client, supports_ttl=False)`` explicitly.
 
-    Records written only to the store before an outage aren't readable until it recovers.
+    Records written only to the store before an outage aren't readable until it recovers:
+    while it's down, a read that misses the fallback raises ``StateUnavailable`` rather than
+    reporting the record as missing.
     """
 
     PROBE_NAMESPACE = "probe"
@@ -339,6 +370,7 @@ class DeploymentStateStore:
     # failover: the store is up, it just refused that one record.
 
     async def get(self, namespace: str, key: str) -> Optional[dict]:
+        store_down = not self._ttl_unsupported
         if await self._use_durable():
             try:
                 value = await self._durable.get(namespace, key)
@@ -349,8 +381,12 @@ class DeploymentStateStore:
             else:
                 if value is not None:
                     return value
+                store_down = False
         # Also covers records not yet copied back after a recovery
-        return await self._fallback.get(namespace, key)
+        value = await self._fallback.get(namespace, key)
+        if value is None and store_down:
+            raise StateUnavailable(f"the LangGraph store is unreachable ({namespace}/{key})")
+        return value
 
     async def put(self, namespace: str, key: str, value: dict, ttl: Optional[float] = None) -> None:
         if await self._use_durable():
@@ -400,9 +436,8 @@ class BridgeState:
 
     def __init__(self, store: StateStore):
         self.store = store
-        # Serializes claims of the same key within this process (the store can't do it for
-        # us): key -> (lock, number of claims holding or waiting for it)
-        self._claim_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        # Serializes claims of the same key within this process (the store can't do it for us)
+        self._claim_locks = KeyedLocks()
 
     @staticmethod
     def _message_key(channel_id: str, ts: str) -> str:
@@ -411,6 +446,10 @@ class BridgeState:
     async def _get(self, namespace: str, key: str) -> Optional[dict]:
         try:
             return await self.store.get(namespace, key)
+        except StateUnavailable as e:
+            # The outage itself was already logged when the store failed over
+            logger.debug(f"Bridge state read missed during an outage: {e}")
+            return None
         except Exception as e:
             logger.warning(f"Bridge state read failed ({namespace}/{key}): {e}")
             return None
@@ -465,38 +504,32 @@ class BridgeState:
     async def claim_trigger(
         self, event_id: Optional[str], channel_id: str, message_ts: str, trigger_kind: str
     ) -> bool:
-        """Record that a trigger is being handled. False if it was already recorded.
+        """Record that a trigger is being handled, and that its message started a run (the
+        edit rule checks this). False if the trigger was already recorded.
 
         The key is the Events API event ID when present, otherwise the message and trigger
         kind. Best effort across replicas: the store has no compare-and-set, so two
         replicas racing on the same redelivery can both claim it.
         """
         key = event_id or f"{self._message_key(channel_id, message_ts)}:{trigger_kind}"
-        lock, holders = self._claim_locks.get(key, (asyncio.Lock(), 0))
-        self._claim_locks[key] = (lock, holders + 1)
-        try:
-            async with lock:
-                if await self._get(self.DEDUPE, key) is not None:
-                    return False
-                await self._put(self.DEDUPE, key, {})
-                return True
-        finally:
-            lock, holders = self._claim_locks[key]
-            if holders == 1:
-                del self._claim_locks[key]
-            else:
-                self._claim_locks[key] = (lock, holders - 1)
-
-    async def mark_started(self, channel_id: str, message_ts: str) -> None:
-        """Remember that a Slack message started a run (edits to it then don't trigger)."""
-        await self._put(self.STARTED, self._message_key(channel_id, message_ts), {})
-
-    async def unmark_started(self, channel_id: str, message_ts: str) -> None:
-        """Forget that a message started a run (its run failed before completing)."""
-        try:
-            await self.store.delete(self.STARTED, self._message_key(channel_id, message_ts))
-        except Exception as e:
-            logger.warning(f"Bridge state delete failed ({self.STARTED}): {e}")
+        async with self._claim_locks.hold(key):
+            if await self._get(self.DEDUPE, key) is not None:
+                return False
+            await asyncio.gather(
+                self._put(self.DEDUPE, key, {}),
+                self._put(self.STARTED, self._message_key(channel_id, message_ts), {}),
+            )
+            return True
 
     async def has_started(self, channel_id: str, message_ts: str) -> bool:
-        return await self._get(self.STARTED, self._message_key(channel_id, message_ts)) is not None
+        """True if a Slack message already started a run.
+
+        When the store can't tell (it's unreachable, or the read fails), the answer is True:
+        an edit that doesn't trigger is better than a second run for the same message.
+        """
+        key = self._message_key(channel_id, message_ts)
+        try:
+            return await self.store.get(self.STARTED, key) is not None
+        except Exception as e:
+            logger.warning(f"Can't tell whether {key} started a run, assuming it did: {e}")
+            return True
