@@ -320,10 +320,45 @@ By default, the following fields are passed:
 - `slack_channel_type`
 - `slack_is_dm`
 - `slack_is_thread`
-- `slack_trigger_kind`: how the run was triggered (`mention`, `direct_message`, `joined_thread`)
+- `slack_trigger_kind`: how the run was triggered (`mention`, `direct_message`, `joined_thread`, `edit`)
 - `slack_author_type`: `human` or `bot`
 - `slack_author_id`, `slack_bot_id`, `slack_app_id`: who authored the trigger
 - `slack_requester_id`: the human who triggered the run (`None` for bot triggers)
+
+### Bot Triggers
+
+By default only humans can trigger the agent. To let CI, alerting or other agents ask it to
+investigate by @-mentioning it:
+
+```python
+bot = SlackBot(
+    allow_bot_triggers=True,
+    bot_trigger_allowlist=["B0123CIBOT", "A0456ALERTS"],  # optional: bot IDs or app IDs
+)
+```
+
+- Bots must always **@-mention** the agent, in channels, direct messages and threads the
+  agent has joined, so a status bot posting updates into a thread doesn't start a run each
+  time. Humans can keep replying in joined threads without a mention.
+- `allowlisted_bots_in_joined_threads=True` relaxes that for allowlisted bots only, for
+  example a trusted companion agent. It requires `bot_trigger_allowlist`.
+- Classic integrations (no user) and modern Slack apps are both recognized as bots. The
+  agent never triggers on its own messages. A bot-triggered reply streams to the bridge's
+  own bot user, since there's no human to stream it to.
+- Bot-triggered runs carry `author_type: "bot"` and no `requester_id` in their provenance
+  (see below). Restricting what the agent does on bot-triggered runs is up to your agent.
+- **Watch for loops between agents.** If another agent is allowed to trigger this one and
+  each @-mentions the other in its replies, they keep triggering each other. The bridge
+  doesn't break such loops: keep the allowlist tight, and have your agent avoid mentioning
+  bots, or stop replying to them, based on `author_type`.
+
+### Edited Messages
+
+Editing a message to add an @-mention of the agent triggers it like a new message, with
+trigger kind `edit`. Edits to a message that already started a run (fixing a typo, say) are
+ignored, even if that run failed (repost the message to try again), and edits follow the same
+bot rules as new messages. While the bridge state store is unreachable, edits don't trigger,
+since the bridge can't tell whether the message already started a run.
 
 ### Provenance in the Run Config
 

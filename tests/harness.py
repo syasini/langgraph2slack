@@ -143,6 +143,9 @@ class FakeSlackWorkspace:
         return self._post_as_agent(args)
 
     def _chat_startStream(self, args: dict) -> dict:
+        # Slack requires a recipient user (and team) to open a stream
+        if not args.get("recipient_user_id") or not args.get("recipient_team_id"):
+            return {"ok": False, "error": "invalid_arguments"}
         return self._post_as_agent(args)
 
     def _chat_update(self, args: dict) -> dict:
@@ -438,8 +441,14 @@ class BridgeHarness:
     def runs(self) -> list[RunRequest]:
         return self.deployment.runs_started
 
-    async def send_event(self, event: dict, *, event_id: Optional[str] = None) -> int:
-        """Deliver an Events API ``event_callback`` and wait for the bridge to finish."""
+    async def send_event(
+        self, event: dict, *, event_id: Optional[str] = None, wait: bool = True
+    ) -> int:
+        """Deliver an Events API ``event_callback`` and wait for the bridge to finish.
+
+        With ``wait=False`` it returns once Slack's delivery is acknowledged, leaving the
+        bridge handling the event in the background (to deliver events concurrently).
+        """
         event = dict(event)
         event.setdefault("type", "message")
         event.setdefault("ts", self.slack.next_ts())
@@ -458,14 +467,14 @@ class BridgeHarness:
             event_id = f"Ev{uuid.uuid4().hex[:12]}"
         if event_id:
             envelope["event_id"] = event_id
-        return await self._dispatch(json.dumps(envelope), "application/json")
+        return await self._dispatch(json.dumps(envelope), "application/json", wait=wait)
 
     async def send_interaction(self, payload: dict) -> int:
         """Deliver an interactivity payload (shortcut, button, view) and wait."""
         body = urlencode({"payload": json.dumps(payload)})
         return await self._dispatch(body, "application/x-www-form-urlencoded")
 
-    async def _dispatch(self, body: str, content_type: str) -> int:
+    async def _dispatch(self, body: str, content_type: str, wait: bool = True) -> int:
         timestamp = str(int(time.time()))
         signature = SignatureVerifier(SIGNING_SECRET).generate_signature(
             timestamp=timestamp, body=body
@@ -479,7 +488,8 @@ class BridgeHarness:
             },
         )
         response = await self.bot.slack_app.async_dispatch(request)
-        await drain()
+        if wait:
+            await drain()
         return response.status
 
     def message(self, channel: str, text: str, **fields) -> dict:
