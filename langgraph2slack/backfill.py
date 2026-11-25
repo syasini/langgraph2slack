@@ -94,7 +94,8 @@ class BackfillCollector:
                 always part of the backfill, kept within the budget first.
         """
         if not self.enabled:
-            return []
+            # A shortcut's message is the context the agent is asked about: always sent
+            return await self.subject_only(subject) if subject else []
         until = ts_key(until_ts or trigger_ts)
         first_contact = not await self._conversation_exists(thread_id)
         subject_ts = subject.get("ts") if subject else None
@@ -136,7 +137,8 @@ class BackfillCollector:
 
         # The thread's parent (first contact) and the subject, once each, always stay; other
         # messages that started runs of their own are left out
-        keep = list(dict.fromkeys(ts for ts in (parent_ts, subject_ts) if ts))
+        # The subject first: it's what the agent is asked about
+        keep = list(dict.fromkeys(ts for ts in (subject_ts, parent_ts) if ts))
         checked = [m for m in earlier if m.get("ts") not in keep]
         started = await asyncio.gather(
             *(self._state.has_started(channel_id, m.get("ts")) for m in checked)
@@ -144,6 +146,11 @@ class BackfillCollector:
         started_ts = {m.get("ts") for m, was_started in zip(checked, started) if was_started}
         earlier = [m for m in earlier if m.get("ts") not in started_ts]
         return await self._within_budget(earlier, keep=keep)
+
+    async def subject_only(self, subject: dict) -> list[NormalizedMessage]:
+        """Just the message a shortcut was used on, within the budget (backfill off, or
+        collecting it failed)."""
+        return await self._within_budget([subject], keep=[subject.get("ts")])
 
     async def advance(self, channel_id: str, conversation_ts: str, seen_ts: str) -> None:
         """Move the conversation's last-seen marker forward to ``seen_ts``."""

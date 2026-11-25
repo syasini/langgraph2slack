@@ -1122,7 +1122,10 @@ class SlackBot:
         # Handler for the "Ask agent about this" message shortcut
         if self.message_shortcut_callback_id:
 
-            @self.slack_app.shortcut(self.message_shortcut_callback_id)
+            # Message shortcuts only: a global shortcut with the same ID has no message
+            @self.slack_app.shortcut(
+                {"type": "message_action", "callback_id": self.message_shortcut_callback_id}
+            )
             async def handle_message_shortcut(ack, shortcut: dict, say):
                 """Start a run on the message the shortcut was used on."""
                 await ack()  # Acknowledge immediately
@@ -1360,10 +1363,13 @@ class SlackBot:
         # For an edit, the trigger's message is the edited message, not the event
         message = trigger.message
         context = MessageContext(event=message, trigger=trigger)
+        context.subject_ts = trigger.subject.get("ts") if trigger.subject else None
+        # A shortcut's message belongs to someone else: user reactions are skipped there
+        user_reactions = trigger.subject is None
 
         # Start user-processing reactions in background (don't block handler); before
         # reading files and backfill, so the user sees the trigger was picked up
-        user_processing_reactions = self._get_reactions_for("user", "processing")
+        user_processing_reactions = user_reactions and self._get_reactions_for("user", "processing")
         if user_processing_reactions:
             self._create_background_task(
                 self._reactions.add_parallel(
@@ -1384,12 +1390,15 @@ class SlackBot:
                 )
                 message_text, files = normalized.text, normalized.files
             context.requested_by = await self._requested_by(context, normalized)
-            # Backfill can fail on its own without costing the request its files
+            # Backfill can fail on its own without costing the request its files, or a
+            # shortcut the message it was used on
             try:
                 backfill = await self._collect_backfill(context, trigger)
             except Exception:
                 logger.exception("Could not collect backfill; starting the run without it")
                 backfill = []
+                if trigger.subject is not None:
+                    backfill = await self._backfill.subject_only(trigger.subject)
             context.files, context.backfill = self._cap_images(files, backfill)
         except Exception:
             logger.exception("Could not prepare the trigger's input; using its raw text")
@@ -1411,7 +1420,9 @@ class SlackBot:
                 )
 
                 # Add user-complete reactions after streaming completes (parallel)
-                user_complete_reactions = self._get_reactions_for("user", "complete")
+                user_complete_reactions = user_reactions and self._get_reactions_for(
+                    "user", "complete"
+                )
                 if user_complete_reactions:
                     await self._reactions.add_parallel(
                         user_complete_reactions, context.channel_id, context.message_ts
@@ -1571,7 +1582,9 @@ class SlackBot:
                     logger.warning("No run_id captured for non-streaming message")
 
                 # Add user-complete reactions (parallel)
-                user_complete_reactions = self._get_reactions_for("user", "complete")
+                user_complete_reactions = user_reactions and self._get_reactions_for(
+                    "user", "complete"
+                )
                 if user_complete_reactions:
                     await self._reactions.add_parallel(
                         user_complete_reactions, context.channel_id, context.message_ts
@@ -1604,7 +1617,7 @@ class SlackBot:
                 )
             # Only remove non-persistent user reactions on success
             # On error, keep them as visual indicators that something went wrong
-            if success:
+            if success and user_reactions:
                 for reaction in self.reactions:
                     if reaction.get("target") == "user" and not reaction.get("persist", False):
                         await self._reactions.remove(
@@ -1622,11 +1635,19 @@ class SlackBot:
             channel = (await self.slack_app.client.conversations_info(channel=channel_id))[
                 "channel"
             ]
-        except SlackApiError as e:
-            if e.response.get("error") in ("channel_not_found", "not_in_channel"):
+        except Exception as e:
+            if isinstance(e, SlackApiError) and e.response.get("error") in (
+                "channel_not_found",
+                "not_in_channel",
+            ):
                 return None
+            # Can't tell (a missing scope, a timeout): try anyway, typed from what we know
             logger.warning(f"Could not check conversation {channel_id}: {e}")
-            return "channel"  # can't tell (e.g. a missing scope): try anyway
+            if channel_id.startswith("D"):
+                return "im"
+            if (shortcut.get("channel") or {}).get("name", "").startswith("mpdm-"):
+                return "mpim"
+            return "group" if channel_id.startswith("G") else "channel"
         if channel.get("is_im"):
             return "im"
         if channel.get("is_member") is False:
@@ -1688,6 +1709,7 @@ class SlackBot:
             provenance=context.provenance,
             backfill=context.backfill,
             files=context.files,
+            subject=next((m for m in context.backfill if m.ts == context.subject_ts), None),
         )
         if not self._input_formatter:
             return default_framer(trigger)

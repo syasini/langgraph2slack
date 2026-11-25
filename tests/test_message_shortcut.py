@@ -261,3 +261,72 @@ async def test_a_message_asked_about_can_still_trigger_by_edit(make_bridge, slac
     )
 
     assert [r.slack_config["trigger_kind"] for r in bridge.runs] == ["shortcut", "edit"]
+
+
+async def test_the_subject_reaches_the_agent_with_backfill_off(make_bridge, slack):
+    bridge = make_bridge(backfill=False)
+    slack.add_message("C0CHAN", ALERT)
+
+    await bridge.send_interaction(shortcut(ALERT))
+
+    assert [m.text for m in bridge.runs[0].backfill] == ["Disk 92% full on db-1"]
+
+
+async def test_the_subject_is_kept_before_the_thread_parent(make_bridge, slack):
+    bridge = make_bridge(backfill_max_messages=1)
+    slack.add_message("C0CHAN", ALERT)
+    target = slack.add_message(
+        "C0CHAN",
+        {"ts": "1700000110.000001", "user": "U0OMAR", "text": "this one", "thread_ts": THREAD},
+    )
+
+    await bridge.send_interaction(shortcut(target))
+
+    assert [m.text for m in bridge.runs[0].backfill] == ["this one"]
+
+
+async def test_the_request_names_the_message_it_is_about(make_bridge, slack):
+    bridge = make_bridge()
+    slack.add_message("C0CHAN", ALERT)
+    target = slack.add_message(
+        "C0CHAN",
+        {"ts": "1700000110.000001", "user": "U0OMAR", "text": "this one", "thread_ts": THREAD},
+    )
+
+    await bridge.send_interaction(shortcut(target))
+
+    (line,) = [ln for ln in bridge.runs[0].text.splitlines() if ln.startswith("Request from")]
+    assert "via message shortcut, about the message from U0OMAR at" in line
+
+
+async def test_a_direct_message_stays_one_when_slack_cannot_describe_it(make_bridge, slack):
+    bridge = make_bridge()
+    slack.fail("conversations.info", "missing_scope")
+    message = {"type": "message", "user": "U0OMAR", "ts": "1700000110.000001", "text": "hi"}
+
+    await bridge.send_interaction(shortcut(message, channel="D0DM"))
+
+    assert bridge.runs[0].slack_config["channel_type"] == "im"
+
+
+async def test_no_reactions_go_on_the_message_a_shortcut_was_used_on(make_bridge, slack):
+    bridge = make_bridge(processing_reaction="eyes")
+    slack.add_message("C0CHAN", ALERT)
+
+    await bridge.send_interaction(shortcut(ALERT))
+
+    assert len(bridge.runs) == 1
+    assert slack.calls_to("reactions.add") == []
+
+
+async def test_a_global_shortcut_with_the_same_id_is_ignored(make_bridge, slack):
+    bridge = make_bridge()
+    payload = shortcut(ALERT)
+    payload["type"] = "shortcut"
+    for field in ("channel", "message", "message_ts"):
+        del payload[field]
+
+    await bridge.send_interaction(payload)
+
+    assert bridge.runs == []
+    assert slack.responses == []
