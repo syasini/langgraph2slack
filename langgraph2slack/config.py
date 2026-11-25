@@ -107,6 +107,8 @@ class MessageContext:
         self.backfill: tuple["NormalizedMessage", ...] = ()
         # Files attached to the trigger, as the agent receives them
         self.files: tuple["FilePart", ...] = ()
+        # For a shortcut, the message it was used on (part of the backfill)
+        self.subject_ts: Optional[str] = None
 
         # Extract basic info from event (no API calls needed)
         self._user_id = event.get("user", "")

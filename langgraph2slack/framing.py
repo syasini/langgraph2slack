@@ -74,6 +74,7 @@ class TriggerInput:
         provenance: Who authored the trigger, and the requester's ID (None for bot triggers)
         backfill: Earlier Slack messages handed over as untrusted context, oldest first
         files: Files attached to the trigger
+        subject: For a message shortcut, the message it was used on (also in ``backfill``)
     """
 
     request: str
@@ -82,6 +83,7 @@ class TriggerInput:
     provenance: Provenance
     backfill: tuple[NormalizedMessage, ...] = ()
     files: tuple[FilePart, ...] = field(default_factory=tuple)
+    subject: Optional[NormalizedMessage] = None
 
 
 def format_slack_ts(ts: str) -> str:
@@ -145,6 +147,13 @@ def default_framer(trigger: TriggerInput) -> dict:
         )
     who = trigger.requested_by
     via = TRIGGER_KIND_LABELS.get(trigger.trigger_kind, trigger.trigger_kind or "Slack")
+    if trigger.subject is not None:
+        # Name the message "this message" means, as its context line shows it
+        subject = trigger.subject
+        via += (
+            f", about the message from {neutralize(subject.display_name)} at "
+            f"{format_slack_ts(subject.ts)}"
+        )
     sections.append(
         f"Request from {neutralize(who.display_name)} ({who.id or 'unknown'}, "
         f"{who.author_type}) via {via}:\n{neutralize(trigger.request)}"
