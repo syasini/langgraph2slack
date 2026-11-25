@@ -357,7 +357,8 @@ bot = SlackBot(
 Editing a message to add an @-mention of the agent triggers it like a new message, with
 trigger kind `edit`. Edits to a message that already started a run (fixing a typo, say) are
 ignored, even if that run failed (repost the message to try again), and edits follow the same
-bot rules as new messages. While the bridge state store is unreachable, edits don't trigger,
+bot rules as new messages. Edits made more than 30 days after posting never trigger, since
+the bridge only remembers started messages that long. While the bridge state store is unreachable, edits don't trigger,
 since the bridge can't tell whether the message already started a run.
 
 ### Provenance in the Run Config

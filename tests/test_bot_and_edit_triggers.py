@@ -193,6 +193,11 @@ def test_joined_thread_opt_in_requires_an_allowlist(make_bridge):
         make_bridge(allow_bot_triggers=True, allowlisted_bots_in_joined_threads=True)
 
 
+def test_a_single_string_allowlist_is_rejected(make_bridge):
+    with pytest.raises(TypeError, match="list"):
+        make_bridge(allow_bot_triggers=True, bot_trigger_allowlist="B0123CIBOT")
+
+
 # ============================================================================
 # Edit triggers
 # ============================================================================
@@ -358,3 +363,13 @@ async def test_edits_do_not_trigger_while_the_store_is_unreachable(make_bridge, 
     await bridge.send_event(mention_added())
 
     assert len(bridge.runs) == 1
+
+
+async def test_edits_long_after_posting_do_not_trigger(make_bridge):
+    bridge = make_bridge()
+    event = edit(f"{MENTION} hello", "hello")
+    event["message"]["edited"]["ts"] = "1603000000.000000"  # about 35 days later
+
+    await bridge.send_event(event)
+
+    assert bridge.runs == []

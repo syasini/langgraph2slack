@@ -256,6 +256,8 @@ class SlackBot:
         self.delete_interrupted_messages = delete_interrupted_messages
 
         # Who besides humans may trigger the agent (validated: raises ValueError)
+        if isinstance(bot_trigger_allowlist, str):
+            raise TypeError("bot_trigger_allowlist must be a list of bot or app IDs, not a string")
         self.bot_triggers = BotTriggerPolicy(
             allow=allow_bot_triggers,
             allowlist=frozenset(bot_trigger_allowlist or ()),

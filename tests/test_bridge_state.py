@@ -649,3 +649,10 @@ async def test_removed_attributes_point_to_bridge_state(make_bridge, name):
 
     with pytest.raises(AttributeError, match="bot.state"):
         getattr(bridge.bot, name)
+
+
+async def test_a_store_without_ttls_is_not_reported_down_on_the_first_read(deployment):
+    deployment.store.supports_ttl = False
+    store = DeploymentStateStore(deployment, clock=lambda: deployment.store.now_seconds)
+
+    assert await store.get("ns", "missing") is None
