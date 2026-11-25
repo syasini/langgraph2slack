@@ -119,6 +119,15 @@ class BridgeIdentity:
         return bool(message.get("user")) and message.get("user") == self.user_id
 
 
+def _age(message: dict, edit_event: dict) -> float:
+    """Seconds between a message being posted and being edited (0 if unknown)."""
+    edited_ts = (message.get("edited") or {}).get("ts") or edit_event.get("event_ts")
+    try:
+        return float(edited_ts) - float(message.get("ts"))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class TriggerGate:
     """Decides whether a Slack message event is a trigger, and of what kind."""
 
@@ -213,7 +222,10 @@ class TriggerGate:
 
     async def _classify_edit(self, event: dict) -> Optional[Trigger]:
         """An edit triggers only when it adds a mention of the agent to a message that
-        hasn't already started a run. Its author is gated like a new message's."""
+        hasn't already started a run. Its author is gated like a new message's.
+
+        Edits made after the bridge stops remembering started messages (30 days) never
+        trigger, since a message that old may well have started a run already."""
         message = {
             **(event.get("message") or {}),
             "channel": event.get("channel"),
@@ -227,6 +239,8 @@ class TriggerGate:
         if not is_bot_mention(message.get("text", ""), identity.user_id):
             return None
         if is_bot_mention(previous.get("text", ""), identity.user_id):
+            return None
+        if _age(message, event) > BridgeState.TTLS[BridgeState.STARTED]:
             return None
         if await self._state.has_started(message["channel"], message.get("ts")):
             return None

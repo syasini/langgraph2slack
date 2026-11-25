@@ -370,8 +370,10 @@ class DeploymentStateStore:
     # failover: the store is up, it just refused that one record.
 
     async def get(self, namespace: str, key: str) -> Optional[dict]:
+        use_durable = await self._use_durable()
+        # Decided after the probe: it may have just found the store lacks TTLs (not down)
         store_down = not self._ttl_unsupported
-        if await self._use_durable():
+        if use_durable:
             try:
                 value = await self._durable.get(namespace, key)
             except Exception as e:
