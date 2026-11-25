@@ -250,8 +250,7 @@ class StreamingHandler(BaseHandler):
         transformed_input = await self._apply_input_transforms(message, context)
 
         # Step 2: Create thread ID
-        thread_timestamp = self._determine_thread_timestamp(context)
-        langgraph_thread = self._create_thread_id(context.channel_id, thread_timestamp)
+        langgraph_thread = self.conversation_thread_id(context)
         logger.info(f"Using LangGraph thread: {langgraph_thread}")
 
         # Step 3: Get team ID for Slack streaming API

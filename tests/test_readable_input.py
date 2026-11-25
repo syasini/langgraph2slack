@@ -3,6 +3,8 @@
 
 import pytest
 
+from langgraph2slack import InMemoryStateStore
+
 from .harness import AGENT_USER_ID
 
 MENTION = f"<@{AGENT_USER_ID}>"
@@ -653,3 +655,69 @@ async def test_format_input_hook_may_be_sync_and_sees_provenance(make_bridge):
     )
 
     assert bridge.runs[0].text == "bot:B0CI:build failed"
+
+
+async def test_code_blocks_and_indentation_reach_the_agent_unchanged(make_bridge):
+    bridge = make_bridge()
+    text = "why does this fail?\n```\ndef f():\n    return  1\n```\n- item\n  - nested"
+
+    await bridge.send_event(bridge.message("D0DM", f"{MENTION} {text}", channel_type="im"))
+
+    assert bridge.runs[0].request == text
+
+
+async def test_first_trigger_backfill_leaves_out_messages_that_started_runs(
+    make_bridge, people, deployment
+):
+    bridge = make_bridge()
+    alert_thread(people)
+    reply = dict(channel_type="channel", thread_ts=THREAD)
+    first = bridge.message("C0CHAN", f"{MENTION} look", ts="1700000220.000001", **reply)
+    people.add_message("C0CHAN", first)
+    await bridge.send_event(first)
+    deployment.threads_by_id.clear()  # as if the first run hadn't created its thread yet
+
+    await bridge.send_event(
+        bridge.message("C0CHAN", f"{MENTION} and this", ts="1700000230.000001", **reply)
+    )
+
+    texts = [line.text for line in bridge.runs[1].backfill]
+    assert "CPU above 95% on db-1" in texts[0]
+    assert not any("look" in text for text in texts)
+
+
+class GarbledMarkers(InMemoryStateStore):
+    """A custom store that hands back last-seen markers the bridge can't parse."""
+
+    async def get(self, namespace, key):
+        value = await super().get(namespace, key)
+        if namespace == "last_seen_markers" and value:
+            return {"ts": "not-a-timestamp"}
+        return value
+
+
+async def test_a_failure_preparing_the_input_still_starts_the_run(make_bridge, people):
+    bridge = make_bridge(state_store=GarbledMarkers())
+    alert_thread(people)
+    reply = dict(channel_type="channel", thread_ts=THREAD)
+    await bridge.send_event(
+        bridge.message("C0CHAN", f"{MENTION} look", ts="1700000220.000001", **reply)
+    )
+
+    await bridge.send_event(
+        bridge.message("C0CHAN", f"{MENTION} again", ts="1700000300.000001", **reply)
+    )
+
+    assert [r.request for r in bridge.runs] == ["look", "again"]
+
+
+async def test_format_input_hook_may_take_the_context_by_keyword(make_bridge):
+    bridge = make_bridge()
+
+    @bridge.bot.format_input
+    def framed(trigger, *, context):
+        return f"{context.channel_id}:{trigger.request}"
+
+    await bridge.send_event(bridge.message("D0DM", "hi", channel_type="im"))
+
+    assert bridge.runs[0].text == "D0DM:hi"

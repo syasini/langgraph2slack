@@ -293,8 +293,20 @@ def _link(match: re.Match) -> str:
 
 
 def _tidy(text: str) -> str:
-    """Collapse runs of spaces left behind by stripped mentions and trim the ends."""
-    lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in text.split("\n")]
+    """Collapse runs of spaces left behind by stripped mentions and trim the ends.
+
+    Indentation is kept, and lines inside ``` code blocks are left exactly as written.
+    """
+    lines, in_code = [], False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+            lines.append(line.rstrip())
+        elif in_code:
+            lines.append(line)
+        else:
+            indent = line[: len(line) - len(line.lstrip())]
+            lines.append(indent + re.sub(r"[ \t]{2,}", " ", line.strip()))
     return "\n".join(lines).strip()
 
 

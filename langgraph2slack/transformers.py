@@ -157,9 +157,20 @@ class TransformerChain:
 
 
 async def call_hook(func: Callable, value: Any, context: MessageContext) -> Any:
-    """Call a developer hook that takes (value) or (value, context), sync or async."""
-    if len(inspect.signature(func).parameters) >= 2:
+    """Call a developer hook that takes (value) or (value, context), sync or async.
+
+    The context is passed when the hook accepts a second positional argument, ``*args``, or
+    a ``context`` keyword.
+    """
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):  # some builtins have no signature
+        params = []
+    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if len(positional) >= 2 or any(p.kind == p.VAR_POSITIONAL for p in params):
         result = func(value, context)
+    elif any(p.name == "context" and p.kind == p.KEYWORD_ONLY for p in params):
+        result = func(value, context=context)
     else:
         result = func(value)
     return await result if inspect.isawaitable(result) else result

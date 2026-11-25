@@ -1091,12 +1091,19 @@ class SlackBot:
 
             # The request as markdown (without the agent's own mention), who asked, and
             # any backfill from the Slack thread
-            normalized = await self._normalizer.normalize(
-                message, strip_mention_of=self._bot_user_id
-            )
-            message_text = normalized.text
-            context.requested_by = await self._requested_by(context, normalized)
-            context.backfill = tuple(await self._collect_backfill(context, trigger))
+            # If any of this fails, the run still starts: with the raw text and no backfill
+            try:
+                normalized = await self._normalizer.normalize(
+                    message, strip_mention_of=self._bot_user_id
+                )
+                message_text = normalized.text
+                context.requested_by = await self._requested_by(context, normalized)
+                context.backfill = tuple(await self._collect_backfill(context, trigger))
+            except Exception:
+                logger.exception("Could not prepare the trigger's input; using its raw text")
+                message_text = message.get("text", "")
+                if self._bot_user_id:
+                    message_text = message_text.replace(f"<@{self._bot_user_id}>", "").strip()
 
             # Start user-processing reactions in background (don't block handler)
             user_processing_reactions = self._get_reactions_for("user", "processing")
@@ -1564,7 +1571,14 @@ class SlackBot:
         if not self._input_formatter:
             return default_framer(trigger)
         result = await call_hook(self._input_formatter, trigger, context)
-        return result if isinstance(result, dict) else {"role": "user", "content": result}
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, (str, list)):
+            return {"role": "user", "content": result}
+        raise TypeError(
+            f"@format_input must return a message dict, a string or content blocks, "
+            f"not {type(result).__name__}"
+        )
 
     async def _remember_reply(
         self, context: MessageContext, reply_ts: str, thread_id: str, run_id: str

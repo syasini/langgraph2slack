@@ -5,18 +5,20 @@
   are the most recent messages that fit the message-count and character budgets.
 - **Later triggers:** only messages posted since the agent last saw the conversation (its
   last-seen marker, or else its last reply in the thread), excluding the agent's own
-  messages and messages that themselves started runs: the agent's conversation memory
-  already holds those.
+  messages.
+- Either way, messages that themselves started runs are left out (except the parent): the
+  agent's conversation memory holds those, or will once their run starts.
 - **After each bridge-started run** the conversation's last-seen marker advances to the
   trigger.
 """
 
+import asyncio
 import dataclasses
 import logging
 from typing import Optional
 
 from .normalizer import NormalizedMessage, SlackMessageNormalizer
-from .state import BridgeState, is_not_found
+from .state import BridgeState, KeyedLocks, is_not_found
 from .triggers import BridgeIdentity
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,8 @@ class BackfillCollector:
         self.enabled = enabled
         self.max_messages = max_messages
         self.max_chars = max_chars
+        # Marker updates for one conversation happen one at a time, so it never moves back
+        self._marker_locks = KeyedLocks()
 
     async def collect(
         self,
@@ -96,11 +100,14 @@ class BackfillCollector:
                 return include_trigger_message
             return ts_key(message.get("ts")) < until
 
-        messages = await self._thread_messages(channel_id, conversation_ts)
+        parent_ts = conversation_ts if first_contact else None
         if first_contact:
+            messages = await self._thread_messages(channel_id, conversation_ts)
             earlier = [m for m in messages if wanted(m)]
         else:
             marker = await self._state.last_seen(channel_id, conversation_ts)
+            # With a marker, only messages after it need reading
+            messages = await self._thread_messages(channel_id, conversation_ts, oldest=marker)
             if marker is None:
                 marker = self._last_reply_ts(messages, identity)
             earlier = [
@@ -112,21 +119,37 @@ class BackfillCollector:
                     or (
                         (marker is None or ts_key(m.get("ts")) > ts_key(marker))
                         and not identity.authored(m)
-                        and not await self._state.has_started(channel_id, m.get("ts"))
                     )
                 )
             ]
 
-        normalized = [await self._normalizer.normalize(m) for m in earlier]
+        # Leave out messages that started runs of their own (the parent and a message the
+        # agent is asked about stay)
+        def exempt(message: dict) -> bool:
+            ts = message.get("ts")
+            return ts == parent_ts or (include_trigger_message and ts == trigger_ts)
+
+        started = await asyncio.gather(
+            *(self._state.has_started(channel_id, m.get("ts")) for m in earlier if not exempt(m))
+        )
+        started_ts = {
+            m.get("ts") for m, s in zip([m for m in earlier if not exempt(m)], started) if s
+        }
+        earlier = [m for m in earlier if m.get("ts") not in started_ts]
+
+        # Only the parent and the most recent messages can fit the budget: normalize just those
+        parent = [m for m in earlier if m.get("ts") == parent_ts]
+        rest = [m for m in earlier if m.get("ts") != parent_ts][-self.max_messages :]
+        normalized = [await self._normalizer.normalize(m) for m in parent + rest]
         normalized = [m for m in normalized if m.text or m.files]
-        parent_ts = conversation_ts if first_contact else None
         return self._within_budget(normalized, keep_ts=parent_ts)
 
     async def advance(self, channel_id: str, conversation_ts: str, seen_ts: str) -> None:
         """Move the conversation's last-seen marker forward to ``seen_ts``."""
-        current = await self._state.last_seen(channel_id, conversation_ts)
-        if current is None or ts_key(seen_ts) > ts_key(current):
-            await self._state.set_last_seen(channel_id, conversation_ts, seen_ts)
+        async with self._marker_locks.hold(f"{channel_id}:{conversation_ts}"):
+            current = await self._state.last_seen(channel_id, conversation_ts)
+            if current is None or ts_key(seen_ts) > ts_key(current):
+                await self._state.set_last_seen(channel_id, conversation_ts, seen_ts)
 
     def _within_budget(
         self, messages: list[NormalizedMessage], keep_ts: Optional[str] = None
@@ -181,12 +204,17 @@ class BackfillCollector:
             logger.warning(f"Could not check LangGraph thread {thread_id}: {e}")
             return True
 
-    async def _thread_messages(self, channel_id: str, thread_ts: str) -> list[dict]:
-        """All messages of a Slack thread (parent included), oldest first."""
+    async def _thread_messages(
+        self, channel_id: str, thread_ts: str, oldest: Optional[str] = None
+    ) -> list[dict]:
+        """A Slack thread's messages (parent included; after ``oldest`` if given), oldest
+        first."""
         by_ts: dict[str, dict] = {}
         cursor = None
         for _ in range(MAX_THREAD_PAGES):
             kwargs = {"channel": channel_id, "ts": thread_ts, "limit": THREAD_PAGE_SIZE}
+            if oldest:
+                kwargs["oldest"] = oldest
             if cursor:
                 kwargs["cursor"] = cursor
             try:
