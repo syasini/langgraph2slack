@@ -17,6 +17,7 @@ import dataclasses
 import logging
 from typing import Optional
 
+from .files import REFERENCE_COST
 from .normalizer import NormalizedMessage, SlackMessageNormalizer
 from .state import BridgeState, KeyedLocks, is_not_found
 from .triggers import BridgeIdentity
@@ -35,9 +36,15 @@ TRUNCATION_MARK = " … [truncated]"
 
 
 def ts_key(ts: Optional[str]) -> tuple[int, int]:
-    """A Slack timestamp as a sortable value ("1700000000.000100" -> (1700000000, 100))."""
+    """A Slack timestamp as a sortable value ("1700000000.000100" -> (1700000000, 100)).
+
+    One that doesn't parse (a corrupt marker, say) sorts as the oldest possible.
+    """
     seconds, _, micros = (ts or "0").partition(".")
-    return int(seconds or 0), int(micros or 0)
+    try:
+        return int(seconds or 0), int(micros or 0)
+    except ValueError:
+        return 0, 0
 
 
 class BackfillCollector:
@@ -158,10 +165,12 @@ class BackfillCollector:
         """
         kept: list[NormalizedMessage] = []
         remaining = self.max_chars
+        # Images past the per-run limit are never downloaded
+        image_slots = self._normalizer.file_limits.max_images
 
         async def take(raw: dict) -> bool:
             """Add a message if it fits; False once the budget is spent."""
-            nonlocal remaining
+            nonlocal remaining, image_slots
             if len(kept) >= self.max_messages:
                 return False
             message = await self._normalizer.normalize(raw, read_files=False)
@@ -171,23 +180,30 @@ class BackfillCollector:
             text_room = remaining - overhead
             if text_room <= 0:
                 return False
-            if len(message.text) > text_room:
-                if text_room < MIN_TRUNCATED_CHARS:
+            # Every file costs at least a reference line: leave room for those
+            references = REFERENCE_COST * len(raw.get("files") or [])
+            if len(message.text) + references > text_room:
+                if text_room - references < MIN_TRUNCATED_CHARS:
                     return False
-                cut = text_room - len(TRUNCATION_MARK)
+                cut = text_room - references - len(TRUNCATION_MARK)
                 message = dataclasses.replace(message, text=message.text[:cut] + TRUNCATION_MARK)
             # Files are read only now, with what's left of the budget: files that can't fit
             # are listed by reference without being downloaded
+            room = text_room - len(message.text)
             files = await self._normalizer.read_files(
-                raw, budget_chars=text_room - len(message.text)
+                raw, budget_chars=room, image_slots=image_slots
             )
+            # Inline what fits, in order, keeping room for the later files' references
+            fitted = []
+            for index, part in enumerate(files):
+                later_references = REFERENCE_COST * (len(files) - index - 1)
+                if part.is_inlined and part.cost() > room - later_references:
+                    part = part.as_reference("not inlined: backfill budget")
+                fitted.append(part)
+                room -= part.cost()
+            files = tuple(fitted)
             files_cost = sum(f.cost() for f in files)
-            if files_cost > text_room - len(message.text):
-                files = tuple(
-                    f.as_reference("not inlined: backfill budget") if f.is_inlined else f
-                    for f in files
-                )
-                files_cost = sum(f.cost() for f in files)
+            image_slots -= sum(1 for f in files if f.kind == "image")
             message = dataclasses.replace(message, files=files)
             kept.append(message)
             remaining -= overhead + len(message.text) + files_cost

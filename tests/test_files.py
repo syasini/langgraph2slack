@@ -305,3 +305,73 @@ async def test_file_contents_cannot_close_their_code_fence(make_bridge, slack):
     await bridge.send_event(file_share(bridge, f"{MENTION} read", [tricky]))
 
     assert "````\n```\nnot code anymore\n````" in bridge.runs[0].text
+
+
+def thread_reply(bridge, text, **fields):
+    fields = {"ts": "1700000300.000001", **fields}
+    return bridge.message("C0CHAN", text, channel_type="channel", thread_ts=THREAD, **fields)
+
+
+async def test_backfill_inlines_the_files_that_fit_and_lists_the_rest(make_bridge, slack):
+    bridge = make_bridge(backfill_max_chars=700)
+    logs = [
+        slack.add_file(f"F0L{i}", f"part{i}.log", "text/plain", b"x" * 400, filetype="text")
+        for i in range(2)
+    ]
+    slack.add_message("C0CHAN", {"ts": THREAD, "user": "U0OMAR", "text": "two logs", "files": logs})
+
+    await bridge.send_event(thread_reply(bridge, f"{MENTION} thoughts?"))
+
+    text = bridge.runs[0].text
+    assert "x" * 400 in text
+    assert "part1.log (text/plain, 400 B, F0L1): not inlined: backfill budget]" in text
+
+
+async def test_backfill_images_past_the_limit_are_not_downloaded(make_bridge, slack):
+    bridge = make_bridge(max_images=1)
+    slack.add_message("C0CHAN", {"ts": THREAD, "user": "U0OMAR", "text": "parent"})
+    for i in range(3):
+        shot = slack.add_file(f"F0S{i}", f"s{i}.png", "image/png", PNG)
+        slack.add_message(
+            "C0CHAN",
+            {"user": "U0OMAR", "text": f"shot {i}", "files": [shot], "thread_ts": THREAD},
+        )
+
+    await bridge.send_event(thread_reply(bridge, f"{MENTION} which one?"))
+
+    assert len(slack.downloads) == 1
+
+
+async def test_an_image_larger_than_slack_said_is_noted_as_an_image(make_bridge, slack):
+    bridge = make_bridge(max_image_bytes=10)
+    shot = slack.add_file("F0SHOT", "shot.png", "image/png", PNG)
+    del shot["size"]
+
+    await bridge.send_event(file_share(bridge, f"{MENTION} look", [shot]))
+
+    assert "shot.png (image/png, unknown size, F0SHOT): too large to attach as an image]" in (
+        bridge.runs[0].text
+    )
+
+
+async def test_the_bot_token_is_only_sent_to_slacks_file_host(make_bridge, slack):
+    bridge = make_bridge()
+    log = slack.add_file("F0LOG", "boot.log", "text/plain", b"ok", filetype="text")
+    log["url_private_download"] = "https://example.com/boot.log"
+
+    await bridge.send_event(file_share(bridge, f"{MENTION} look", [log]))
+
+    assert "boot.log (text/plain, 2 B, F0LOG): not a Slack file URL]" in bridge.runs[0].text
+    assert slack.downloads == []
+
+
+async def test_a_corrupt_last_seen_marker_does_not_fail_the_reply(make_bridge, slack, caplog):
+    bridge = make_bridge()
+    slack.add_message("C0CHAN", {"ts": THREAD, "user": "U0OMAR", "text": "parent"})
+    await bridge.send_event(thread_reply(bridge, f"{MENTION} first"))
+    await bridge.bot.state.set_last_seen("C0CHAN", THREAD, "not-a-timestamp")
+
+    await bridge.send_event(thread_reply(bridge, f"{MENTION} again", ts="1700000400.000001"))
+
+    assert len(bridge.runs) == 2
+    assert "Failed to run listener" not in caplog.text

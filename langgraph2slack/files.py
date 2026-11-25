@@ -115,6 +115,9 @@ async def download(client: httpx.AsyncClient, url: str, token: str, max_bytes: i
 
     Raises FileUnavailable if the file can't be read or is larger than ``max_bytes``.
     """
+    # The bot token only ever goes to Slack's file host
+    if urlparse(url).hostname not in FILE_HOSTS:
+        raise FileUnavailable("not a Slack file URL")
     try:
         async with client.stream(
             "GET", url, headers={"Authorization": f"Bearer {token}"}
@@ -142,24 +145,34 @@ class SlackFileReader:
         self.limits = limits
 
     async def read(
-        self, files: list[dict], *, budget_chars: Optional[int] = None
+        self,
+        files: list[dict],
+        *,
+        budget_chars: Optional[int] = None,
+        image_slots: Optional[int] = None,
     ) -> tuple[FilePart, ...]:
         """Read a message's files, concurrently.
 
         ``budget_chars`` (backfill) lists files that can't fit by reference, before
-        downloading them.
+        downloading them. Images beyond ``image_slots`` are listed by reference without
+        being downloaded.
         """
+        reads, images = [], 0
         async with _new_client() as client:
-            reads = [
-                (
-                    self._read_one(client, file, budget_chars)
-                    if index < MAX_FILES_PER_MESSAGE
-                    else _done(
-                        _placeholder(file).as_reference("not read: too many files on one message")
+            for index, file in enumerate(files or []):
+                part = _placeholder(file)
+                if index >= MAX_FILES_PER_MESSAGE:
+                    reads.append(
+                        _done(part.as_reference("not read: too many files on one message"))
                     )
-                )
-                for index, file in enumerate(files or [])
-            ]
+                    continue
+                if part.mimetype in IMAGE_SIGNATURES and self.limits.inline_images:
+                    images += 1
+                    if image_slots is not None and images > image_slots:
+                        note = "not attached: image limit for one request reached"
+                        reads.append(_done(part.as_reference(note)))
+                        continue
+                reads.append(self._read_one(client, file, budget_chars))
             return tuple(await asyncio.gather(*reads))
 
     async def _read_one(
@@ -175,8 +188,10 @@ class SlackFileReader:
             return part.as_unreadable("no download URL")
 
         limits = self.limits
+        too_large = "too large to inline"
         try:
             if part.mimetype in IMAGE_SIGNATURES:
+                too_large = "too large to attach as an image"
                 if not limits.inline_images:
                     return part.as_reference("image inlining is off")
                 if (part.size or 0) > limits.max_image_bytes:
@@ -210,7 +225,7 @@ class SlackFileReader:
                 return dataclasses.replace(part, kind="text", text=text)
         except FileUnavailable as e:
             if str(e) == "too large":
-                return part.as_reference("too large to inline")
+                return part.as_reference(too_large)
             return part.as_unreadable(str(e))
 
         return part.as_reference("not a text or supported image file")

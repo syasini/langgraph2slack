@@ -112,12 +112,19 @@ class SlackMessageNormalizer:
         )
 
     async def read_files(
-        self, message: dict, *, budget_chars: Optional[int] = None
+        self,
+        message: dict,
+        *,
+        budget_chars: Optional[int] = None,
+        image_slots: Optional[int] = None,
     ) -> tuple[FilePart, ...]:
-        """The message's files as the agent receives them (``budget_chars``: see the reader)."""
+        """The message's files as the agent receives them (``budget_chars`` and
+        ``image_slots``: see the reader)."""
         if not self._files or not message.get("files"):
             return ()
-        return await self._files.read(message["files"], budget_chars=budget_chars)
+        return await self._files.read(
+            message["files"], budget_chars=budget_chars, image_slots=image_slots
+        )
 
     # -- markup conversion -------------------------------------------------
 

@@ -1135,9 +1135,13 @@ class SlackBot:
                 )
                 message_text = normalized.text
                 context.requested_by = await self._requested_by(context, normalized)
-                context.files, context.backfill = self._cap_images(
-                    normalized.files, await self._collect_backfill(context, trigger)
-                )
+                # Backfill can fail on its own without costing the request its files
+                try:
+                    backfill = await self._collect_backfill(context, trigger)
+                except Exception:
+                    logger.exception("Could not collect backfill; starting the run without it")
+                    backfill = []
+                context.files, context.backfill = self._cap_images(normalized.files, backfill)
             except Exception:
                 logger.exception("Could not prepare the trigger's input; using its raw text")
                 message_text = message.get("text", "")
